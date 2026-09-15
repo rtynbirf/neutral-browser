@@ -118,4 +118,64 @@ references with a required `;` (unknown names stay literal — spec behavior)
 plus full numeric references with the normative windows-1252 remap and U+FFFD
 rules. Everything above is listed in the README status table, not hidden.
 
+## Stage 4: CSS parser -> STYLE (v0.5.0)
+
+The next link of the engine chain (`DOM -> CSS -> STYLE`): the `<style>`
+elements of the parsed DOM (and, explicitly requested, the user's own CSS
+file) are tokenized, parsed into rules, matched against the tree and cascaded
+into per-element computed declarations. Nothing runs implicitly: the stage
+runs on `--fetch ... --style` or `--dom-file ... --style`; an external
+stylesheet is never fetched.
+
+```text
+<style> ELEMENTS OF THE DOM  +  USER CSS FILE (--css-file, user principal)
+    |
+    v
+CSS TOKENIZER (src/css.rs, CSS Syntax L3 subset)
+    ident / function / at-keyword / hash / string / bad-string
+    url / bad-url / number / percentage / dimension / delim
+    punctuation; backslash escapes (hex <= 6 digits, U+FFFD rules)
+    |
+    v
+PARSER (subset)
+    qualified rules -> selectors + declaration block
+    declarations: name (lowercased) : value-span [!important]
+    error recovery: empty/garbage/nested/EOF -> counted, dropped, no abort
+    at-rules: consumed and ignored, counted (STYLE_AT_RULES_SKIPPED)
+    |
+    v
+SELECTORS (Selectors L3 subset)
+    type / universal / .class / #id / [attr] / [attr="value"]
+    descendant + child combinators, comma grouping
+    specificity (a, b, c)
+    |
+    v
+CASCADE (author origin)          MATCHING (right-to-left over the tree)
+    winner per property =            class list split on whitespace
+    max(important, inline,           exact attribute comparison
+    specificity, source order)       iterative ancestor walks
+    |
+    v
+STYLE RESULT (per element, document order)
+    +--> counters: STYLE_SRC_ELEMENTS / RULES / DECLS / AT_RULES_SKIPPED /
+    |              ERRORS / ELEMENTS_STYLED / PROPS
+    +--> canonical dump "STYLE v1" (frozen format, alphabetical properties)
+```
+
+`src/css.rs` is pure (no network, no filesystem I/O — machine-checked by
+`tests/architecture.py`); the walk, matching and dump are iterative — deep
+trees cascade without stack overflow (unit test).
+
+Documented subset deviations: at-rules are never applied (no @media
+evaluation, no @import fetching); no inheritance, shorthand expansion or
+var(); no pseudo-classes/pseudo-elements, no `+`/`~` combinators, no
+attribute operators `~= ^= $= *= |=`, no namespaces (such selectors are
+counted as parse errors and the rule is dropped); declaration values are kept
+verbatim (comments stripped, ends trimmed, whitespace not collapsed);
+external stylesheets are not fetched. Inline `style` attributes participate
+in the cascade with the standard author-origin priority (inline important >
+sheet important > inline normal > sheet normal). Everything above is listed
+in the README status table, not hidden.
+
+
 

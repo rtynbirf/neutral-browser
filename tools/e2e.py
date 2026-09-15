@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end machine verification for neutral-browser stage 2.
+"""End-to-end machine verification for neutral-browser (stages 2-4).
 
 Starts a local HTTP test server, drives the REAL compiled binary and asserts
 its machine output line by line. Verdict per case (E2E_Tn_*=PASS/FAIL) and a
@@ -206,6 +206,119 @@ def main() -> int:
         check("E2E_T10_DOM_ERROR", o.get("DOM") == "ERROR", raw)
         check("E2E_T10_KIND", o.get("ERROR_KIND") == "IO", raw)
         check("E2E_T10_EXIT5", rc == 5, raw)
+
+        # ---- Stage 4: CSS -> STYLE ----
+
+        EXPECTED_STYLE_DUMP = """STYLE v1
+E5 html>body>p
+  color: red
+  font-size: 12px
+  margin: 4px
+E6 html>body>p
+  border: 1px
+  color: blue
+  font-size: 20px
+  padding: 2px
+E8 html>body>div>p
+  color: red
+  font-size: 12px
+  margin: 0
+E9 html>body>span
+  margin: 0
+"""
+
+        # T11: fetch -> DOM -> <style> CSS -> cascade -> STYLE (exact dump)
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            out_dump = Path(td) / "style.txt"
+            rc, o, raw = run_client(
+                ["--fetch", f"{base}/styled", "--dom", "--style",
+                 "--style-output", str(out_dump)]
+            )
+            check("E2E_T11_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+            check("E2E_T11_SRC", o.get("STYLE_SRC_ELEMENTS") == "1", raw)
+            check("E2E_T11_RULES", o.get("STYLE_RULES") == "6", raw)
+            check("E2E_T11_DECLS", o.get("STYLE_DECLS") == "8", raw)
+            check("E2E_T11_AT_SKIP", o.get("STYLE_AT_RULES_SKIPPED") == "0", raw)
+            check("E2E_T11_ERRORS", o.get("STYLE_ERRORS") == "0", raw)
+            check("E2E_T11_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "4", raw)
+            check("E2E_T11_PROPS", o.get("STYLE_PROPS") == "11", raw)
+            check("E2E_T11_STYLE_OK", o.get("STYLE") == "OK", raw)
+            check(
+                "E2E_T11_DUMP_EXACT",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8") == EXPECTED_STYLE_DUMP,
+                raw,
+            )
+
+        # T11b: page without CSS -> honest zero counters, still OK
+        rc, o, raw = run_client(["--fetch", f"{base}/index.html", "--dom", "--style"])
+        check("E2E_T11B_SRC", o.get("STYLE_SRC_ELEMENTS") == "0", raw)
+        check("E2E_T11B_RULES", o.get("STYLE_RULES") == "0", raw)
+        check("E2E_T11B_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "0", raw)
+        check("E2E_T11B_PROPS", o.get("STYLE_PROPS") == "0", raw)
+        check("E2E_T11B_OK", o.get("STYLE") == "OK" and rc == 0, raw)
+
+        # T12: chunked framing -> same bytes -> same cascade (framing->STYLE chain)
+        rc, o, raw = run_client(["--fetch", f"{base}/styled-chunked", "--style"])
+        check("E2E_T12_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+        check("E2E_T12_SRC", o.get("STYLE_SRC_ELEMENTS") == "1", raw)
+        check("E2E_T12_RULES", o.get("STYLE_RULES") == "6", raw)
+        check("E2E_T12_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "4", raw)
+        check("E2E_T12_PROPS", o.get("STYLE_PROPS") == "11", raw)
+        check("E2E_T12_STYLE_OK", o.get("STYLE") == "OK", raw)
+
+        # T13: --dom-file + --css-file (user principal) -> exact dump;
+        # at-rules are skipped and counted
+        CSS_SRC = (
+            "/* c */ .a { color: red }\n"
+            "div span { color: green }\n"
+            "@media screen { p { color: blue } }\n"
+            "p { color: purple }\n"
+        )
+        USER_HTML = (
+            '<!doctype html><html><body><p class="a">hi'
+            "<div><span>go</span></div></body></html>"
+        )
+        EXPECTED_USER_DUMP = """STYLE v1
+E3 html>body>p
+  color: red
+E5 html>body>div>span
+  color: green
+"""
+        with tempfile.TemporaryDirectory() as td:
+            src_html = Path(td) / "user.html"
+            src_css = Path(td) / "user.css"
+            out_dump = Path(td) / "user_style.txt"
+            src_html.write_text(USER_HTML, encoding="utf-8")
+            src_css.write_text(CSS_SRC, encoding="utf-8")
+            rc, o, raw = run_client(
+                ["--dom-file", str(src_html), "--style", "--css-file", str(src_css),
+                 "--style-output", str(out_dump)]
+            )
+            check("E2E_T13_STYLE_OK", o.get("STYLE") == "OK" and rc == 0, raw)
+            check("E2E_T13_SRC", o.get("STYLE_SRC_ELEMENTS") == "0", raw)
+            check("E2E_T13_RULES", o.get("STYLE_RULES") == "3", raw)
+            check("E2E_T13_DECLS", o.get("STYLE_DECLS") == "3", raw)
+            check("E2E_T13_AT_SKIP", o.get("STYLE_AT_RULES_SKIPPED") == "1", raw)
+            check("E2E_T13_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "2", raw)
+            check("E2E_T13_PROPS", o.get("STYLE_PROPS") == "2", raw)
+            check(
+                "E2E_T13_DUMP_EXACT",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8") == EXPECTED_USER_DUMP,
+                raw,
+            )
+
+            # T13b: missing --css-file -> honest IO error, exit 5
+            rc, o, raw = run_client(
+                ["--dom-file", str(src_html), "--style", "--css-file",
+                 str(Path(td) / "missing.css")]
+            )
+            check("E2E_T13B_STYLE_ERROR", o.get("STYLE") == "ERROR", raw)
+            check("E2E_T13B_KIND", o.get("ERROR_KIND") == "IO", raw)
+            check("E2E_T13B_EXIT5", rc == 5, raw)
     finally:
         server.terminate()
         try:

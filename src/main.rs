@@ -1,11 +1,13 @@
-//! neutral-browser — user-owned browser, stage 3: HTML tokenizer -> DOM.
+//! neutral-browser — user-owned browser, stage 4: CSS -> STYLE.
 //!
-//! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> report.
+//! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> CSS -> STYLE.
 //! Nothing is done implicitly: the network is touched only by --fetch;
-//! DOM parsing happens on the fetched body (--dom) or on the user's own
-//! file (--dom-file, the user is the principal — not a web capability).
+//! parsing happens on the fetched body (--dom/--style) or on the user's own
+//! files (--dom-file/--css-file, the user is the principal — not a web
+//! capability).
 
 mod broker;
+mod css;
 mod dom;
 mod html;
 mod http;
@@ -19,7 +21,7 @@ use std::process::exit;
 use broker::Broker;
 use policy::{Capability, Decision, Policy};
 
-const VERSION: &str = "0.4.0";
+const VERSION: &str = "0.5.0";
 
 fn main() {
     exit(run());
@@ -53,13 +55,13 @@ fn run() -> i32 {
         return fetch_command(&args, &raw);
     }
     println!("neutral-browser {}", VERSION);
-    println!("STATUS=STAGE3_DOM");
-    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM");
+    println!("STATUS=STAGE4_STYLE");
+    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE");
     println!(
-        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
+        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-inheritance,css-link-stylesheets,css-advanced-selectors,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
     );
     println!(
-        "USAGE: neutral-browser --fetch <url> [--dom] [--dom-output <file>] [--output <file>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--dom-output <file>] | --self-test"
+        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--dom-output <f>] [--style-output <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--css-file <path>] [--dom-output <f>] [--style-output <f>] | --self-test"
     );
     0
 }
@@ -84,14 +86,25 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
         }
     };
     let html_src = String::from_utf8_lossy(&bytes).into_owned();
-    dom_report(&html_src, flag(args, "--dom-output").as_deref())
+    let r = dom::build(&html_src);
+    let rc = dom_report(&r, flag(args, "--dom-output").as_deref());
+    if rc != 0 {
+        return rc;
+    }
+    if has_flag(args, "--style") {
+        return style_stage(
+            &r.dom,
+            flag(args, "--css-file").as_deref(),
+            flag(args, "--style-output").as_deref(),
+        );
+    }
+    0
 }
 
-/// Parse HTML and print the machine-readable DOM report block.
+/// Print the machine-readable DOM report block from a parsed tree.
 /// Exit code 0 on success (parse errors do not abort — HTML recovery is
 /// normative), 5 if the dump file cannot be written.
-fn dom_report(html_src: &str, dump_out: Option<&str>) -> i32 {
-    let r = dom::build(html_src);
+fn dom_report(r: &dom::ParseResult, dump_out: Option<&str>) -> i32 {
     let c = r.dom.counts();
     println!("DOM_NODES={}", c.nodes);
     println!("DOM_ELEMENTS={}", c.elements);
@@ -122,6 +135,61 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         .position(|a| a == name)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Stage 4: cascade the stylesheet over the DOM and report STYLE.
+/// CSS sources: <style> elements inside the DOM (inline) and, when given,
+/// the user's own CSS file (--css-file, the user is the principal).
+/// CSS parse errors do not abort (CSS recovery is normative); only a file
+/// I/O failure or a dump write failure aborts with exit code 5.
+fn style_stage(tree: &dom::Dom, css_file: Option<&str>, style_output: Option<&str>) -> i32 {
+    let (sheet_text, src_elems) = css::collect_style_text(tree);
+    let mut rules = Vec::new();
+    let mut errors = 0usize;
+    let mut at_skip = 0usize;
+    let mut decls_total = 0usize;
+    let out = css::parse(&sheet_text);
+    decls_total += out.decl_count();
+    rules.extend(out.rules);
+    errors += out.errors;
+    at_skip += out.at_rules_skipped;
+    println!("STYLE_SRC_ELEMENTS={}", src_elems);
+    if let Some(p) = css_file {
+        let bytes = match std::fs::read(p) {
+            Ok(b) => b,
+            Err(e) => {
+                println!("STYLE=ERROR");
+                println!("ERROR_KIND=IO");
+                println!("DETAIL={}", e);
+                return 5;
+            }
+        };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let o2 = css::parse(&text);
+        decls_total += o2.decl_count();
+        rules.extend(o2.rules);
+        errors += o2.errors;
+        at_skip += o2.at_rules_skipped;
+    }
+    println!("STYLE_RULES={}", rules.len());
+    println!("STYLE_DECLS={}", decls_total);
+    println!("STYLE_AT_RULES_SKIPPED={}", at_skip);
+    println!("STYLE_ERRORS={}", errors);
+    let ap = css::apply(tree, &rules);
+    println!("STYLE_ELEMENTS_STYLED={}", ap.styled);
+    println!("STYLE_PROPS={}", ap.props);
+    if let Some(out_path) = style_output {
+        match std::fs::write(&out_path, css::dump(&ap)) {
+            Ok(_) => println!("STYLE_SAVED={}", out_path),
+            Err(e) => {
+                println!("STYLE_SAVE_ERROR={}", e);
+                println!("STYLE=ERROR");
+                return 5;
+            }
+        }
+    }
+    println!("STYLE=OK");
+    0
 }
 
 fn fetch_command(args: &[String], raw: &str) -> i32 {
@@ -178,11 +246,24 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                     Err(e) => println!("BODY_SAVE_ERROR={}", e),
                 }
             }
-            if has_flag(args, "--dom") {
+            if has_flag(args, "--dom") || has_flag(args, "--style") {
                 let html_src = String::from_utf8_lossy(&rep.body).into_owned();
-                let rc = dom_report(&html_src, flag(args, "--dom-output").as_deref());
-                if rc != 0 {
-                    return rc;
+                let r = dom::build(&html_src);
+                if has_flag(args, "--dom") {
+                    let rc = dom_report(&r, flag(args, "--dom-output").as_deref());
+                    if rc != 0 {
+                        return rc;
+                    }
+                }
+                if has_flag(args, "--style") {
+                    let rc = style_stage(
+                        &r.dom,
+                        flag(args, "--css-file").as_deref(),
+                        flag(args, "--style-output").as_deref(),
+                    );
+                    if rc != 0 {
+                        return rc;
+                    }
                 }
             }
             println!("FETCH=OK");
@@ -426,6 +507,93 @@ fn self_test() -> i32 {
     assert_eq!(c.elements, n + 3);
     assert_eq!(c.depth, n + 2);
     println!("DOM_TREE=PASS");
+
+    // ---- Stage 4: CSS tokenizer (CSS Syntax L3 subset) ----
+    let (t, e) = css::tokenize("a.b#c[x=\"1\"] { color: red !important }");
+    assert_eq!(e, 0);
+    assert_eq!(t[0].t, css::Tok::Ident("a".into()));
+    assert_eq!(t[1].t, css::Tok::Delim('.'));
+    assert_eq!(t[2].t, css::Tok::Ident("b".into()));
+    assert_eq!(t[3].t, css::Tok::Hash("c".into()));
+    assert_eq!(t[4].t, css::Tok::LBracket);
+    assert_eq!(t[5].t, css::Tok::Ident("x".into()));
+    assert_eq!(t[6].t, css::Tok::Delim('='));
+    assert_eq!(t[7].t, css::Tok::Str("1".into()));
+    assert_eq!(t[8].t, css::Tok::RBracket);
+    assert_eq!(t[10].t, css::Tok::LBrace);
+    assert_eq!(t[13].t, css::Tok::Colon);
+    assert!(t.iter().any(|x| x.t == css::Tok::Delim('!')));
+    let (t, e) = css::tokenize("url(a/b.png) 12px 50% rgb(1,2,3) \"s\"");
+    assert_eq!(e, 0);
+    assert_eq!(t[0].t, css::Tok::Url("a/b.png".into()));
+    assert_eq!(t[2].t, css::Tok::Dim("12".into(), "px".into()));
+    assert_eq!(t[4].t, css::Tok::Percent("50".into()));
+    assert_eq!(t[6].t, css::Tok::Function("rgb".into()));
+    assert_eq!(t[14].t, css::Tok::Str("s".into()));
+    assert_eq!(css::tokenize("\"a").1, 1); // EOF in string is an error
+    assert_eq!(css::tokenize("url(a b)").1, 1); // bad url is an error
+    println!("CSS_TOKENIZER=PASS");
+
+    // ---- Stage 4: CSS parse (rules, selectors, recovery) ----
+    let o = css::parse("p, .x { color: red; font-size : 12px }");
+    assert_eq!(o.errors, 0);
+    assert_eq!(o.rules.len(), 1);
+    assert_eq!(o.rules[0].selectors[0].spec, (0, 0, 1));
+    assert_eq!(o.rules[0].selectors[1].spec, (0, 1, 0));
+    assert_eq!(o.rules[0].decls[1].value, "12px");
+
+    let o = css::parse(
+        "#y { color: blue !important } @media screen { p { color: white } } p { color: red }",
+    );
+    assert_eq!(o.errors, 0);
+    assert_eq!(o.at_rules_skipped, 1);
+    assert_eq!(o.rules.len(), 2);
+    assert!(o.rules[0].decls[0].important);
+
+    let o = css::parse("p:hover { color: red } a { color: }"); // selector dropped, decl dropped
+    assert_eq!(o.rules.len(), 1); // rule `a` survives with zero declarations
+    assert_eq!(o.rules[0].decls.len(), 0);
+    assert_eq!(o.errors, 2);
+    println!("CSS_PARSE=PASS");
+
+    // ---- Stage 4: cascade -> STYLE ----
+    let doc = dom::build(r#"<p class="x" id="y">t</p>"#);
+    let o = css::parse("p { color: red } .x { color: green } #y { color: blue }");
+    let ap = css::apply(&doc.dom, &o.rules);
+    assert_eq!(ap.styled, 1);
+    assert_eq!(ap.elements[0].index, 3); // html head body p
+    assert_eq!(ap.elements[0].path, "html>body>p");
+    let color = ap.elements[0]
+        .decls
+        .iter()
+        .find(|(k, _)| k == "color")
+        .unwrap();
+    assert_eq!(color.1, "blue"); // id (1,0,0) beats class and type
+
+    let doc = dom::build(r#"<div id="a"><p style="color: black">x</p></div>"#);
+    let o = css::parse("p { color: red }");
+    let ap = css::apply(&doc.dom, &o.rules);
+    let p = &ap.elements.iter().find(|e| e.index == 4).unwrap();
+    assert_eq!(
+        p.decls.iter().find(|(k, _)| k == "color").unwrap().1,
+        "black"
+    ); // inline beats sheet normal
+    let o = css::parse("#a p { color: green !important }");
+    let ap = css::apply(&doc.dom, &o.rules);
+    let p = &ap.elements.iter().find(|e| e.index == 4).unwrap();
+    assert_eq!(
+        p.decls.iter().find(|(k, _)| k == "color").unwrap().1,
+        "green"
+    ); // sheet important beats inline normal
+
+    let doc = dom::build(r#"<p style="color: red">x</p>"#);
+    let o = css::parse("p { margin: 0 }");
+    let ap = css::apply(&doc.dom, &o.rules);
+    assert_eq!(
+        css::dump(&ap),
+        "STYLE v1\nE3 html>body>p\n  color: red\n  margin: 0\n"
+    );
+    println!("CSS_CASCADE=PASS");
 
     0
 }

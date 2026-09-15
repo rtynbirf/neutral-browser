@@ -13,6 +13,7 @@ required = [
     "src/sha256.rs",
     "src/html.rs",
     "src/dom.rs",
+    "src/css.rs",
     "tools/serve_test_page.py",
     "tools/e2e.py",
     "docs/ARCHITECTURE.md",
@@ -73,6 +74,21 @@ for name, txt in (("html.rs", html_txt), ("dom.rs", dom_txt)):
 for flag in ["--dom-file", "--dom-output", "PARSE_ERRORS", "DOM_ELEMENTS"]:
     assert flag in main_txt, f"main.rs missing stage-3 token: {flag}"
 
+# ---- Stage 4 structural invariants ----
+css_txt = (root / "src/css.rs").read_text()
+
+for token in ["fn tokenize", "struct Selector", "struct Compound", "fn parse", "fn apply", "fn matches"]:
+    assert token in css_txt, f"css.rs missing token: {token}"
+
+# css.rs is pure: no I/O of any kind (network or filesystem).
+assert "TcpStream" not in css_txt, "css.rs must not touch the network"
+assert "std::fs" not in css_txt, "css.rs must not touch the filesystem"
+assert "tokio" not in css_txt and "reqwest" not in css_txt, "css.rs must stay dependency-free"
+
+# CLI surface of stage 4.
+for flag in ["--style", "--css-file", "--style-output", "STYLE_ELEMENTS_STYLED", "STYLE_RULES"]:
+    assert flag in main_txt, f"main.rs missing stage-4 token: {flag}"
+
 # Zero external runtime dependencies; lockfile present.
 toml = (root / "Cargo.toml").read_text()
 assert "[dependencies]" in toml
@@ -84,8 +100,11 @@ readme = (root / "README.md").read_text()
 assert "NOT_IMPLEMENTED" in readme, "honest status table required in README"
 # Stage 3 must be honestly documented as a subset.
 assert "foster" in readme.lower(), "README must document the no-foster-parenting subset"
+# Stage 4 must honestly document the at-rules subset.
+assert "at-rules" in readme.lower(), "README must document the at-rules-are-skipped subset"
 
 print("ARCHITECTURE_TEST=PASS")
 print("POLICY_BROKER_MODEL=PASS")
 print("STAGE2_STRUCTURE=PASS")
 print("STAGE3_STRUCTURE=PASS")
+print("STAGE4_STRUCTURE=PASS")
