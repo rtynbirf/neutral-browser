@@ -74,3 +74,48 @@ NOT_IMPLEMENTED (scope is recorded in the capability but not yet checked);
 DNS uses the OS resolver, user-configurable DNS NOT_IMPLEMENTED; obs-fold and
 compressed transfer codings are rejected, NOT_IMPLEMENTED.
 
+## Stage 3: HTML tokenizer -> DOM (v0.4.0)
+
+The next link of the engine chain (`RESPONSE -> HTML PARSER -> DOM`): the
+fetched body is tokenized and built into a DOM tree by a documented subset of
+the WHATWG HTML Standard. Nothing runs implicitly: parsing happens on the
+`--fetch ... --dom` body or on the user's own file via `--dom-file`.
+
+```text
+RESPONSE BODY (bytes, lossy UTF-8)
+    |
+    v
+HTML TOKENIZER (src/html.rs, WHATWG §13.5 subset)
+    Data / TagOpen / attribute family / comments / bogus comment
+    DOCTYPE(name) / RAWTEXT / RCDATA / PLAINTEXT / character references
+    |
+    |  TokControl: the tree builder flips the tokenizer's raw modes
+    v
+TREE CONSTRUCTION (src/dom.rs, WHATWG §13.2.6 subset)
+    initial -> before html -> before head -> in head -> after head
+    -> in body (text, after body, after after body)
+    implied html/head/body, void elements, p/li/dd/dt auto-close,
+    </br> -> <br>, image -> img, first-wins attribute dedup,
+    text merging, error recovery (never aborts)
+    |
+    v
+DOM ARENA (NodeData: Document/Doctype/Element/Text/Comment)
+    |
+    +--> counts: NODES/ELEMENTS/TEXTS/COMMENTS/DEPTH/DOCTYPE
+    +--> canonical dump (frozen format, iterative, byte-exact)
+    +--> machine report: DOM_*, PARSE_ERRORS, PARSE_ERROR_KINDS
+```
+
+Both modules are pure (no network, no filesystem I/O — machine-checked by
+`tests/architecture.py`). Dump and counts are iterative: 10,000-deep nesting
+parses without stack overflow (unit test).
+
+Documented subset deviations: no foster parenting / in-table modes
+(`<table><tr>` keeps `tr` as a direct child of `table`); no adoption agency /
+active formatting elements; SVG/MathML parsed as ordinary HTML elements; no
+template insertion modes; DOCTYPE name only; 80 common named character
+references with a required `;` (unknown names stay literal — spec behavior)
+plus full numeric references with the normative windows-1252 remap and U+FFFD
+rules. Everything above is listed in the README status table, not hidden.
+
+

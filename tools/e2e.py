@@ -124,6 +124,88 @@ def main() -> int:
             raw,
         )
         check("E2E_T6_EXIT5", rc == 5, raw)
+
+        # ---- Stage 3: HTML tokenizer -> DOM ----
+
+        # T7: fetch + DOM of the known page (implied structure, no errors)
+        rc, o, raw = run_client(["--fetch", f"{base}/index.html", "--dom"])
+        check("E2E_T7_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+        check("E2E_T7_DOM_OK", o.get("DOM") == "OK", raw)
+        check("E2E_T7_DOCTYPE", o.get("DOM_DOCTYPE") == "html", raw)
+        check("E2E_T7_ELEMENTS", o.get("DOM_ELEMENTS") == "6", raw)  # html head title body h1 p
+        check("E2E_T7_TEXTS", o.get("DOM_TEXTS") == "3", raw)
+        check("E2E_T7_COMMENTS", o.get("DOM_COMMENTS") == "0", raw)
+        check("E2E_T7_NODES", o.get("DOM_NODES") == "11", raw)
+        check("E2E_T7_DEPTH", o.get("DOM_DEPTH") == "4", raw)
+        check("E2E_T7_CLEAN", o.get("PARSE_ERRORS") == "0", raw)
+
+        # T8: chunked framing -> same bytes -> same DOM (framing->DOM chain)
+        rc, o, raw = run_client(["--fetch", f"{base}/chunked", "--dom"])
+        check("E2E_T8_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+        check("E2E_T8_DOM_OK", o.get("DOM") == "OK", raw)
+        check("E2E_T8_SHA", o.get("BODY_SHA256") == PAGE_SHA, raw)
+        check("E2E_T8_ELEMENTS", o.get("DOM_ELEMENTS") == "6", raw)
+
+        # T9: --dom-file on a tricky document: exact tree dump equality
+        import tempfile
+
+        TRICKY = (
+            '<!doctype html><html><body><!--c--><div CLASS="a&amp;b" hidden>'
+            "1 &lt; 2<p>x<ul><li>i<li>j</ul></div>"
+            '<script>var s="</p>";if(a<b)X()</script>'
+            "<title>t</title></body></html>"
+        )
+        EXPECTED_DUMP = r"""#document
+  <!DOCTYPE html>
+  <html>
+    <head>
+    <body>
+      <!--c-->
+      <div class="a&amp;b" hidden="">
+        "1 < 2"
+        <p>
+          "x"
+        <ul>
+          <li>
+            "i"
+          <li>
+            "j"
+      <script>
+        "var s=\"</p>\";if(a<b)X()"
+      <title>
+        "t"
+"""
+        with tempfile.TemporaryDirectory() as td:
+            src_html = Path(td) / "tricky.html"
+            out_dump = Path(td) / "dump.txt"
+            src_html.write_text(TRICKY, encoding="utf-8")
+            rc, o, raw = run_client(
+                [
+                    "--dom-file",
+                    str(src_html),
+                    "--dom-output",
+                    str(out_dump),
+                ]
+            )
+            check("E2E_T9_DOM_OK", o.get("DOM") == "OK" and rc == 0, raw)
+            check("E2E_T9_DOCTYPE", o.get("DOM_DOCTYPE") == "html", raw)
+            check("E2E_T9_ELEMENTS", o.get("DOM_ELEMENTS") == "10", raw)  # html head body div p ul li li script title
+            check("E2E_T9_TEXTS", o.get("DOM_TEXTS") == "6", raw)
+            check("E2E_T9_COMMENTS", o.get("DOM_COMMENTS") == "1", raw)
+            check("E2E_T9_NODES", o.get("DOM_NODES") == "19", raw)
+            check("E2E_T9_DEPTH", o.get("DOM_DEPTH") == "6", raw)
+            check("E2E_T9_CLEAN", o.get("PARSE_ERRORS") == "0", raw)
+            check(
+                "E2E_T9_DUMP_EXACT",
+                out_dump.exists() and out_dump.read_text(encoding="utf-8") == EXPECTED_DUMP,
+                raw,
+            )
+
+        # T10: missing file -> honest IO error, exit 5
+        rc, o, raw = run_client(["--dom-file", "/nonexistent/path/x.html"])
+        check("E2E_T10_DOM_ERROR", o.get("DOM") == "ERROR", raw)
+        check("E2E_T10_KIND", o.get("ERROR_KIND") == "IO", raw)
+        check("E2E_T10_EXIT5", rc == 5, raw)
     finally:
         server.terminate()
         try:

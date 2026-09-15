@@ -11,6 +11,8 @@ required = [
     "src/http.rs",
     "src/network.rs",
     "src/sha256.rs",
+    "src/html.rs",
+    "src/dom.rs",
     "tools/serve_test_page.py",
     "tools/e2e.py",
     "docs/ARCHITECTURE.md",
@@ -52,6 +54,25 @@ assert "sha256" in (root / "src/sha256.rs").read_text()
 main_txt = (root / "src/main.rs").read_text()
 assert "--fetch" in main_txt and "--self-test" in main_txt
 
+# ---- Stage 3 structural invariants ----
+html_txt = (root / "src/html.rs").read_text()
+dom_txt = (root / "src/dom.rs").read_text()
+
+for token in ["fn tokenize", "struct TokControl", "enum Token"]:
+    assert token in html_txt, f"html.rs missing token: {token}"
+for token in ["struct Dom", "enum NodeData", "fn dump", "fn build", "fn counts"]:
+    assert token in dom_txt, f"dom.rs missing token: {token}"
+
+# html.rs and dom.rs are pure: no I/O of any kind (network or filesystem).
+for name, txt in (("html.rs", html_txt), ("dom.rs", dom_txt)):
+    assert "TcpStream" not in txt, f"{name} must not touch the network"
+    assert "std::fs" not in txt, f"{name} must not touch the filesystem"
+    assert "tokio" not in txt and "reqwest" not in txt, f"{name} must stay dependency-free"
+
+# CLI surface of stage 3.
+for flag in ["--dom-file", "--dom-output", "PARSE_ERRORS", "DOM_ELEMENTS"]:
+    assert flag in main_txt, f"main.rs missing stage-3 token: {flag}"
+
 # Zero external runtime dependencies; lockfile present.
 toml = (root / "Cargo.toml").read_text()
 assert "[dependencies]" in toml
@@ -61,7 +82,10 @@ assert after == "", f"dependencies list must stay empty, found: {after!r}"
 # Anti-facade statuses documented.
 readme = (root / "README.md").read_text()
 assert "NOT_IMPLEMENTED" in readme, "honest status table required in README"
+# Stage 3 must be honestly documented as a subset.
+assert "foster" in readme.lower(), "README must document the no-foster-parenting subset"
 
 print("ARCHITECTURE_TEST=PASS")
 print("POLICY_BROKER_MODEL=PASS")
 print("STAGE2_STRUCTURE=PASS")
+print("STAGE3_STRUCTURE=PASS")
