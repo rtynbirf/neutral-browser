@@ -19,6 +19,8 @@ Endpoints:
   /sub/rel.html     -> 200, relative + ../ + absolute link hrefs
   /sub/sheet.css    -> 200, stylesheet for /sub/rel.html
   /root.css, /abs.css -> 200, stylesheets for /sub/rel.html
+  /layout           -> 200, page exercising block layout (stage 6)
+  /layout-chunked   -> 200, chunked framing of the layout page
   anything else     -> 404, short plain-text body
 
 No third-party modules. No telemetry. Binds 127.0.0.1 only.
@@ -101,6 +103,19 @@ REL_PAGE = (
     b'<body><p>x</p></body></html>'
 )
 
+LAYOUT = (
+    b'<!doctype html><html><head><title>l</title><style>'
+    b'body { margin: 0 }'
+    b'#wrap { width: 400px; margin: 0 auto }'
+    b'#a { width: 100px; height: 40px; padding: 5px; border-width: 2px;'
+    b' box-sizing: border-box }'
+    b'.none { display: none }'
+    b'#pc { width: 50%; height: 25% }'
+    b'</style></head><body>'
+    b'<div id="wrap"><div id="a">a</div><div class="none">h</div><div id="pc">p</div></div>'
+    b'</body></html>'
+)
+
 SHEET_CSS = b"p { color: red }\n.c { color: green; padding: 1px }\n"
 LATE_CSS = b".z { color: blue }\n"
 ROOT_CSS = b"p { color: teal }\n"
@@ -150,6 +165,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_fixed(200, CAP_CSS, "text/css")
         elif self.path == "/sub/rel.html":
             self._send_fixed(200, REL_PAGE, "text/html; charset=utf-8")
+        elif self.path == "/layout":
+            self._send_fixed(200, LAYOUT, "text/html; charset=utf-8")
+        elif self.path == "/layout-chunked":
+            self._send_chunked(LAYOUT, "text/html; charset=utf-8")
         elif self.path == "/sub/sheet.css":
             self._send_fixed(200, SUB_SHEET_CSS, "text/css")
         elif self.path == "/root.css":

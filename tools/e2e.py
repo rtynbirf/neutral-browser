@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end machine verification for neutral-browser (stages 2-5).
+"""End-to-end machine verification for neutral-browser (stages 2-6).
 
 Starts a local HTTP test server, drives the REAL compiled binary and asserts
 its machine output line by line. Verdict per case (E2E_Tn_*=PASS/FAIL) and a
@@ -499,6 +499,159 @@ E6 html>body>p
         check("E2E_T19_RULES", o.get("STYLE_RULES") == "8", raw)
         check("E2E_T19_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "1", raw)
         check("E2E_T19_STYLE_OK", o.get("STYLE") == "OK", raw)
+
+        # ---- Stage 6: block layout ----
+
+        # Frozen dump of /layout (verified against the real binary, then
+        # frozen): centering, border-box, display:none, % width, indefinite
+        # % height -> auto. Ordinals include title/style (head subtree).
+        EXPECTED_LAYOUT_DUMP = """LAYOUT v1
+B0 html
+  rect 0 0 800 40
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 800 40
+B4 html>body
+  rect 0 0 800 40
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 800 40
+B5 html>body>div
+  rect 200 0 400 40
+  margin 0 200 0 200
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 400 40
+B6 html>body>div>div
+  rect 200 0 100 40
+  margin 0 300 0 0
+  padding 5 5 5 5
+  border 2 2 2 2
+  content 86 26
+B8 html>body>div>div
+  rect 200 40 200 0
+  margin 0 200 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 200 0
+"""
+
+        # T20: fetch -> DOM -> cascade -> STYLE -> LAYOUT (exact dump):
+        # --layout implies --style (the STYLE block always precedes LAYOUT)
+        with tempfile.TemporaryDirectory() as td:
+            out_dump = Path(td) / "layout.txt"
+            rc, o, raw = run_client(
+                ["--fetch", f"{base}/layout", "--layout",
+                 "--layout-output", str(out_dump)]
+            )
+            check("E2E_T20_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+            check("E2E_T20_STYLE_OK", o.get("STYLE") == "OK", raw)
+            check("E2E_T20_RULES", o.get("STYLE_RULES") == "5", raw)
+            check("E2E_T20_DECLS", o.get("STYLE_DECLS") == "11", raw)
+            check("E2E_T20_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "5", raw)
+            check("E2E_T20_BOXES", o.get("LAYOUT_BOXES") == "5", raw)
+            check("E2E_T20_HIDDEN", o.get("LAYOUT_HIDDEN") == "2", raw)
+            check("E2E_T20_ERRORS", o.get("LAYOUT_ERRORS") == "0", raw)
+            check("E2E_T20_LAYOUT_OK", o.get("LAYOUT") == "OK" and rc == 0, raw)
+            check(
+                "E2E_T20_DUMP_EXACT",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8") == EXPECTED_LAYOUT_DUMP,
+                raw,
+            )
+
+            # T21: chunked framing -> same bytes -> same layout dump
+            out_dump2 = Path(td) / "layout2.txt"
+            rc, o2, raw2 = run_client(
+                ["--fetch", f"{base}/layout-chunked", "--layout",
+                 "--layout-output", str(out_dump2)]
+            )
+            check("E2E_T21_FETCH_OK", o2.get("FETCH") == "OK" and rc == 0, raw2)
+            check("E2E_T21_BOXES", o2.get("LAYOUT_BOXES") == "5", raw2)
+            check(
+                "E2E_T21_SAME_DUMP",
+                out_dump2.exists()
+                and out_dump2.read_text(encoding="utf-8") == EXPECTED_LAYOUT_DUMP,
+                raw2,
+            )
+
+        # T22: --dom-file + --css-file (user principal): unsupported values
+        # are counted (width:red, display:flex) and fall back honestly;
+        # the layout still completes
+        USER_HTML2 = (
+            '<!doctype html><html><body><div class="bad">x'
+            '<div id="flex">f</div></div><p>para</p></body></html>'
+        )
+        CSS_SRC2 = (
+            "div { width: 100px }\n"
+            ".bad { width: red }\n"
+            "#flex { display: flex }\n"
+            "p { height: 30px; padding: 2px }\n"
+        )
+        EXPECTED_USER_LAYOUT = """LAYOUT v1
+B0 html
+  rect 0 0 800 34
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 800 34
+B2 html>body
+  rect 0 0 800 34
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 800 34
+B3 html>body>div
+  rect 0 0 800 0
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 800 0
+B4 html>body>div>div
+  rect 0 0 100 0
+  margin 0 700 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 100 0
+B5 html>body>p
+  rect 0 0 800 34
+  margin 0 0 0 0
+  padding 2 2 2 2
+  border 0 0 0 0
+  content 796 30
+"""
+        with tempfile.TemporaryDirectory() as td:
+            src_html = Path(td) / "user.html"
+            src_css = Path(td) / "user.css"
+            out_dump = Path(td) / "user_layout.txt"
+            src_html.write_text(USER_HTML2, encoding="utf-8")
+            src_css.write_text(CSS_SRC2, encoding="utf-8")
+            rc, o, raw = run_client(
+                ["--dom-file", str(src_html), "--layout", "--css-file",
+                 str(src_css), "--layout-output", str(out_dump)]
+            )
+            check("E2E_T22_LAYOUT_OK", o.get("LAYOUT") == "OK" and rc == 0, raw)
+            check("E2E_T22_BOXES", o.get("LAYOUT_BOXES") == "5", raw)
+            check("E2E_T22_HIDDEN", o.get("LAYOUT_HIDDEN") == "1", raw)
+            check("E2E_T22_ERRORS", o.get("LAYOUT_ERRORS") == "2", raw)
+            check(
+                "E2E_T22_DUMP_EXACT",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8") == EXPECTED_USER_LAYOUT,
+                raw,
+            )
+
+            # T22b: unwritable dump path -> honest IO error, exit 5
+            rc, o, raw = run_client(
+                ["--dom-file", str(src_html), "--layout", "--layout-output",
+                 str(Path(td) / "no" / "such" / "dir" / "x.txt")]
+            )
+            check("E2E_T22B_LAYOUT_ERROR", o.get("LAYOUT") == "ERROR", raw)
+            check("E2E_T22B_KIND", o.get("ERROR_KIND") == "IO", raw)
+            check("E2E_T22B_EXIT5", rc == 5, raw)
+
     finally:
         server.terminate()
         try:

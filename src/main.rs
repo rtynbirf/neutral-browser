@@ -1,18 +1,23 @@
-//! neutral-browser — user-owned browser, stage 5: computed STYLE.
+//! neutral-browser — user-owned browser, stage 6: block layout (LAYOUT).
 //!
-//! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> CSS -> STYLE.
+//! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> CSS
+//!        -> STYLE -> LAYOUT.
 //! Nothing is done implicitly: the network is touched only by --fetch;
 //! parsing happens on the fetched body (--dom/--style) or on the user's own
 //! files (--dom-file/--css-file, the user is the principal — not a web
 //! capability). Stage 5: <link rel=stylesheet> sheets are fetched through
 //! the same broker-gated chain (base URL from --fetch only), and inherited
 //! properties propagate computed values down the DOM (STYLE v2 dump).
+//! Stage 6: block layout per CSS 2.1 ch.10 subset — box tree with used
+//! widths/heights/positions (LAYOUT v1 dump). --layout implies --style:
+//! the cascade always runs first, then the layout pass.
 
 mod broker;
 mod css;
 mod dom;
 mod html;
 mod http;
+mod layout;
 mod network;
 mod policy;
 mod sha256;
@@ -23,7 +28,7 @@ use std::process::exit;
 use broker::Broker;
 use policy::{Capability, Decision, Policy};
 
-const VERSION: &str = "0.6.0";
+const VERSION: &str = "0.7.0";
 
 /// Cap on distinct <link rel=stylesheet> sheets fetched per page: link
 /// fetches are engine-triggered network I/O and must stay bounded.
@@ -61,13 +66,13 @@ fn run() -> i32 {
         return fetch_command(&args, &raw);
     }
     println!("neutral-browser {}", VERSION);
-    println!("STATUS=STAGE5_COMPUTED");
-    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE");
+    println!("STATUS=STAGE6_LAYOUT");
+    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE->LAYOUT");
     println!(
-        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
+        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,layout-line-boxes,layout-inline-splitting,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
     );
     println!(
-        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--dom-output <f>] [--style-output <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--css-file <path>] [--dom-output <f>] [--style-output <f>] | --self-test"
+        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--layout] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--layout] [--css-file <path>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] | --self-test"
     );
     0
 }
@@ -97,8 +102,8 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
     if rc != 0 {
         return rc;
     }
-    if has_flag(args, "--style") {
-        return style_stage(
+    if has_flag(args, "--style") || has_flag(args, "--layout") {
+        let (rc, ap) = style_stage(
             &r.dom,
             flag(args, "--css-file").as_deref(),
             flag(args, "--style-output").as_deref(),
@@ -106,6 +111,12 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
             std::time::Duration::ZERO,
             None,
         );
+        if rc != 0 {
+            return rc;
+        }
+        if let (Some(ap), true) = (ap, has_flag(args, "--layout")) {
+            return layout_stage(&r.dom, &ap, flag(args, "--layout-output").as_deref());
+        }
     }
     0
 }
@@ -198,7 +209,7 @@ fn style_stage(
     base: Option<&url::Url>,
     timeout: std::time::Duration,
     subject_override: Option<&str>,
-) -> i32 {
+) -> (i32, Option<css::StyleApply>) {
     let list = css::collect_sheets(tree);
     let mut rules = Vec::new();
     let mut errors = 0usize;
@@ -267,7 +278,7 @@ fn style_stage(
                 println!("STYLE=ERROR");
                 println!("ERROR_KIND=IO");
                 println!("DETAIL={}", e);
-                return 5;
+                return (5, None);
             }
         };
         let text = String::from_utf8_lossy(&bytes).into_owned();
@@ -292,11 +303,34 @@ fn style_stage(
             Err(e) => {
                 println!("STYLE_SAVE_ERROR={}", e);
                 println!("STYLE=ERROR");
-                return 5;
+                return (5, None);
             }
         }
     }
     println!("STYLE=OK");
+    (0, Some(ap))
+}
+
+/// Stage 6: block layout over the DOM with the computed STYLE. The layout
+/// pass itself is pure (layout::run); this wrapper only reports counters,
+/// writes the optional LAYOUT v1 dump and maps I/O failures to exit 5.
+fn layout_stage(tree: &dom::Dom, ap: &css::StyleApply, out_path: Option<&str>) -> i32 {
+    let lo = layout::run(tree, ap);
+    println!("LAYOUT_BOXES={}", lo.boxes.len());
+    println!("LAYOUT_HIDDEN={}", lo.hidden);
+    println!("LAYOUT_ERRORS={}", lo.errors);
+    if let Some(p) = out_path {
+        match std::fs::write(p, layout::dump(&lo)) {
+            Ok(_) => println!("LAYOUT_SAVED={}", p),
+            Err(e) => {
+                println!("LAYOUT_SAVE_ERROR={}", e);
+                println!("LAYOUT=ERROR");
+                println!("ERROR_KIND=IO");
+                return 5;
+            }
+        }
+    }
+    println!("LAYOUT=OK");
     0
 }
 
@@ -354,7 +388,7 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                     Err(e) => println!("BODY_SAVE_ERROR={}", e),
                 }
             }
-            if has_flag(args, "--dom") || has_flag(args, "--style") {
+            if has_flag(args, "--dom") || has_flag(args, "--style") || has_flag(args, "--layout") {
                 let html_src = String::from_utf8_lossy(&rep.body).into_owned();
                 let r = dom::build(&html_src);
                 if has_flag(args, "--dom") {
@@ -363,8 +397,8 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                         return rc;
                     }
                 }
-                if has_flag(args, "--style") {
-                    let rc = style_stage(
+                if has_flag(args, "--style") || has_flag(args, "--layout") {
+                    let (rc, ap) = style_stage(
                         &r.dom,
                         flag(args, "--css-file").as_deref(),
                         flag(args, "--style-output").as_deref(),
@@ -374,6 +408,16 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                     );
                     if rc != 0 {
                         return rc;
+                    }
+                    if let (Some(ap), true) = (ap, has_flag(args, "--layout")) {
+                        let lrc = layout_stage(
+                            &r.dom,
+                            &ap,
+                            flag(args, "--layout-output").as_deref(),
+                        );
+                        if lrc != 0 {
+                            return lrc;
+                        }
                     }
                 }
             }
@@ -759,6 +803,36 @@ fn self_test() -> i32 {
     assert_eq!(ap.inherited_elements, 4);
     assert!(css::is_inherited("color") && !css::is_inherited("margin"));
     println!("CSS_INHERIT=PASS");
+
+    // ---- Stage 6: layout value parsing ----
+    assert_eq!(layout::parse_len("12px"), Some(layout::Len::Px(12)));
+    assert_eq!(layout::parse_len("-3px"), Some(layout::Len::Px(-3)));
+    assert_eq!(layout::parse_len("50%"), Some(layout::Len::Pct(50)));
+    assert_eq!(layout::parse_len("0"), Some(layout::Len::Px(0)));
+    assert_eq!(layout::parse_len("auto"), Some(layout::Len::Auto));
+    assert_eq!(layout::parse_len("12em"), None); // unit unsupported
+    assert_eq!(layout::parse_len("12"), None); // unitless non-zero
+    assert_eq!(layout::parse_len("red"), None);
+    println!("LAYOUT_RESOLVE=PASS");
+
+    // ---- Stage 6: cascade -> STYLE -> block layout ----
+    let doc = dom::build(r#"<div id="a"><p style="width:100px;height:40px">x</p></div>"#);
+    let o = css::parse("#a { width: 200px; margin: 0 auto }");
+    let ap = css::apply(&doc.dom, &o.rules);
+    let lo = layout::run(&doc.dom, &ap);
+    // boxes: html(0), body(2), div(3), p(4); head is display:none by default
+    assert_eq!(lo.hidden, 1);
+    assert_eq!(lo.errors, 0);
+    let d = lo.boxes.iter().find(|b| b.index == 3).unwrap();
+    assert_eq!((d.x, d.y, d.w(), d.content_w), (300, 0, 200, 200)); // centered
+    assert_eq!((d.ml, d.mr), (300, 300));
+    let p = lo.boxes.iter().find(|b| b.index == 4).unwrap();
+    assert_eq!((p.x, p.content_w, p.content_h), (300, 100, 40));
+    for b in &lo.boxes {
+        assert_eq!(b.w(), b.bl + b.pl + b.content_w + b.pr + b.br);
+        assert_eq!(b.border_h(), b.bt + b.pt + b.content_h + b.pb + b.bb);
+    }
+    println!("LAYOUT_FLOW=PASS");
 
     0
 }

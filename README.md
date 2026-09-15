@@ -5,9 +5,9 @@
 (`docs/MASTER_PROMPT.md`). Правило проекта: **каждый статус подтверждается машинным
 выводом, а не обещанием**.
 
-Текущая версия: **0.6.0 / STAGE5_COMPUTED**
+Текущая версия: **0.7.0 / STAGE6_LAYOUT**
 
-Цепочка этапа 5: `URL → Broker → TCP → HTTP/1.1 → тело → HTML → DOM → CSS → STYLE (вычисленные значения) → машинный отчёт`
+Цепочка этапа 6: `URL → Broker → TCP → HTTP/1.1 → тело → HTML → DOM → CSS → STYLE (вычисленные значения) → LAYOUT (блочная раскладка) → машинный отчёт`
 
 ## Что уже РАБОТАЕТ (VERIFIED — машинное доказательство)
 
@@ -19,10 +19,10 @@
 | Разбор HTTP/1.1-ответа (статус, заголовки) | VERIFIED | `HTTP_PARSE=PASS` |
 | Chunked-декодер (RFC 9112) | VERIFIED | `CHUNKED_DECODE=PASS` + `E2E_T2_SHA` |
 | SHA-256 (FIPS 180-4, целостность тела) | VERIFIED | `SHA256_VECTORS=PASS` (3 опубликованных вектора NIST) |
-| Fetch-цепочка целиком через брокер | VERIFIED | `E2E_TEST=PASS` — случаи T1–T19 на живом локальном сервере |
+| Fetch-цепочка целиком через брокер | VERIFIED | `E2E_TEST=PASS` — случаи T1–T22 на живом локальном сервере |
 | Путь отказа брокера (сокет не открывается) | VERIFIED | `E2E_T4_DENIED`, `NETWORK=CLOSED` |
 | Структурный инвариант: единственный `TcpStream::connect` в `src/network.rs`, за брокером | VERIFIED | `STAGE2_STRUCTURE=PASS` |
-| HTML-токенизатор (подмножество WHATWG §13.5): данные, теги, семейство атрибутов, комментарии (включая `--!>`), фиктивный комментарий, DOCTYPE (имя), RAWTEXT/RCDATA/PLAINTEXT, символьные ссылки | VERIFIED | `HTML_TOKENIZER=PASS` (самотест) + 65 юнит-тестов `cargo test` |
+| HTML-токенизатор (подмножество WHATWG §13.5): данные, теги, семейство атрибутов, комментарии (включая `--!>`), фиктивный комментарий, DOCTYPE (имя), RAWTEXT/RCDATA/PLAINTEXT, символьные ссылки | VERIFIED | `HTML_TOKENIZER=PASS` (самотест) + 86 юнит-тестов `cargo test` |
 | Числовые символьные ссылки с нормативной таблицей windows-1252 (0x80–0x9F) и правилами U+FFFD | VERIFIED | юнит-тесты: `&#128;`→€, `&#xD800;`→FFFD, `&#0;`→FFFD |
 | Конструктор дерева DOM (подмножество WHATWG §13.2.6): подразумеваемые html/head/body, void-элементы, автозакрытие p/li/dd/dt, `</br>`→`<br>`, `image`→`img`, пропуск LF после pre/textarea/listing | VERIFIED | `DOM_TREE=PASS` (самотест) + юнит-тесты с точным дампом дерева |
 | Канонический дамп дерева DOM (замороженный формат, итеративный) | VERIFIED | `E2E_T9_DUMP_EXACT` — побайтовое равенство на хитром документе |
@@ -37,7 +37,11 @@
 | Источники CSS: `<style>`-элементы DOM + `<link rel=stylesheet>` (скачиваются той же fetch-цепочкой через брокер, дедупликация по URL, лимит 8, ошибки считаются) + файл пользователя `--css-file` (юзер-принципипал) | VERIFIED | `E2E_T15` (link+style), `E2E_T17` (три вида отказов ссылок не прерывают каскад), `E2E_T19` (лимит), `E2E_T13` (--css-file) |
 | Разрешение href ссылок (подмножество RFC 3986 §5): абсолютный/scheme-relative/абсолютный путь/относительный со снятием dot-сегментов, query-only, фрагмент отбрасывается | VERIFIED | `URL_RESOLVE=PASS` (самотест, 11 случаев) + `E2E_T18_URLS` |
 | Наследование CSS (подмножество: 28 inherited-свойств, замороженный список в `css.rs`): вычисленное значение родителя распространяется вниз; перекрывается собственным каскадным победителем; initial values НЕ выдумываются | VERIFIED | `CSS_INHERIT=PASS` + `E2E_T14_DUMP_EXACT` + юнит-тесты (перекрытие в середине цепочки, не-наследование margin, цепь глубиной 500 без переполнения) |
-| Чистота модулей движка: `html.rs`/`dom.rs`/`css.rs` без сетевого и файлового I/O | VERIFIED | `STAGE3_STRUCTURE=PASS`, `STAGE4_STRUCTURE=PASS` (`tests/architecture.py`) |
+| Блочная раскладка (подмножество CSS 2.1 гл. 10): поток блоков внутри content-box родителя, ICB 800×600; ширина §10.3.3 — px/%/auto, автополя центрируют, over-constrained решается в LTR (margin-right поглощает), width:auto обнуляет автополя; высота §10.6.3/§10.5 — px/% (только против definite-высоты контейнера), auto = сумма margin-box детей; padding/border-width в px/% (проценты — от ШИРИНЫ контейнера, включая вертикальные); `box-sizing: border-box`; `display: none` убирает поддерево | VERIFIED | `LAYOUT_RESOLVE=PASS`, `LAYOUT_FLOW=PASS` (самотест) + 20 юнит-тестов `layout.rs` (центрирование, over-constrained, border-box, стек высот, % высоты definite/indefinite, скрытые поддеревья, инвариант уравнений бокса) |
+| Канонический LAYOUT-дамп (замороженный формат `LAYOUT v1`: `B<инд> <путь>` + `rect x y w h` / `margin` / `padding` / `border` / `content w h`, порядок документа, display:none-поддеревья отсутствуют) | VERIFIED | `E2E_T20_DUMP_EXACT`, `E2E_T21_SAME_DUMP` (chunked), `E2E_T22_DUMP_EXACT` — побайтовое равенство |
+| Счётчики раскладки: `LAYOUT_BOXES`, `LAYOUT_HIDDEN` (элементы, чей собственный `display:none` убрал бокс), `LAYOUT_ERRORS` (неподдержанные значения известных свойств — учитываются и откатываются к умолчанию, работа не прерывается) | VERIFIED | `E2E_T20`, `E2E_T22_ERRORS` (width:red, display:flex → 2 ошибки, раскладка завершена) |
+| Глубина 10 000 вложенных div в раскладке без переполнения стека | VERIFIED | юнит-тест `deep_nesting_10000_no_overflow` (все проходы раскладки итеративные) |
+| Чистота модулей движка: `html.rs`/`dom.rs`/`css.rs`/`layout.rs` без сетевого и файлового I/O | VERIFIED | `STAGE3/4/6_STRUCTURE=PASS` (`tests/architecture.py`) |
 
 ## Что НЕ реализовано (честно, анти-фасад из МАСТЕР-ПРОМПТА §23)
 
@@ -54,6 +58,13 @@
 | Атрибуты `media`/`disabled` у `<link>` и `<style>` | NOT_IMPLEMENTED — все собранные листы применяются безусловно |
 | Следование @import внутри скачанных листов | NOT_IMPLEMENTED — at-правила поглощаются, глубина скачивания = 1 (только ссылки из HTML) |
 | Продвинутые селекторы: псевдоклассы/псевдоэлементы, `+`/`~`, атрибутные операторы `~= ^= $= *= \|=`, пространства имён | NOT_IMPLEMENTED — такой селектор = ошибка разбора, правило отбрасывается (счётчик `STYLE_ERRORS`) |
+| Строчная раскладка (line boxes) и текст | NOT_IMPLEMENTED — текстовые узлы не генерируют боксов и не дают высоты (шрифтов в движке нет); блок с чисто текстовым содержимым имеет высоту 0 |
+| Inline-элементы как inline | NOT_IMPLEMENTED — раскладываются как блоки (отклонение задокументировано в `layout.rs`); block-in-inline сплиттинга нет |
+| Таблица стилей агента пользователя (UA stylesheet) | NOT_IMPLEMENTED — замороженные подмножества: списки inline-by-default и never-rendered элементов в `layout.rs`; умолчания margin/padding = 0 |
+| Float / position / flex / grid / table-layout / min-max размеры / трансформации | NOT_IMPLEMENTED — раскладывается только статический блок-поток |
+| Схлопывание вертикальных margin (margin collapsing) | NOT_IMPLEMENTED — вертикальные отступы просто складываются |
+| Shorthand `border` в раскладке | NOT_IMPLEMENTED — читаются только longhand `border-*-width`/`border-width`; сам shorthand игнорируется (как не-layout свойство) |
+| Конфликт shorthand/longhand (`margin` vs `margin-left`) | NOT_IMPLEMENTED по исходному порядку — longhand всегда побеждает (порядок алфавита дампа STYLE, задокументированное упрощение) |
 | Shorthand-раскрытие, `var()`, CSS-переменные, @keyframes | NOT_IMPLEMENTED — значения хранятся как текст |
 | Foster parenting и режимы вставки таблиц | NOT_IMPLEMENTED — `<table><tr>` парсится без подразумеваемого `<tbody>` (документированное отклонение) |
 | Алгоритм усыновления (adoption agency) и активные форматирующие элементы | NOT_IMPLEMENTED — неправильно вложенные `b/i/em` остаются буквально вложенными |
@@ -61,7 +72,7 @@
 | Специальные режимы `<template>` | NOT_IMPLEMENTED |
 | Полная таблица именованных символьных ссылок (2231 запись) и legacy-набор без `;` | NOT_IMPLEMENTED — реализовано 80 общих имён с обязательным `;` |
 | public/system-идентификаторы DOCTYPE, вычисление quirks mode | NOT_IMPLEMENTED — захватывается только имя |
-| Layout / рендеринг / JS | NOT_IMPLEMENTED — этапы 5+ по МАСТЕР-ПРОМПТУ |
+| Layout / рендеринг / JS | NOT_IMPLEMENTED частично: блочная раскладка есть (этап 6), строчная раскладка, рендеринг (paint) и JS — этапы 7+ по МАСТЕР-ПРОМПТУ |
 | Песочница ОС (seccomp/pledge/AppContainer) | NOT_IMPLEMENTED — этап 1 остаётся прототипом policy/broker в одном процессе |
 | obs-fold в заголовках, gzip/br-сжатие | NOT_IMPLEMENTED — такие ответы отклоняются как BAD_HEADER |
 
@@ -97,6 +108,8 @@ CSS_PARSE=PASS
 CSS_CASCADE=PASS
 URL_RESOLVE=PASS
 CSS_INHERIT=PASS
+LAYOUT_RESOLVE=PASS
+LAYOUT_FLOW=PASS
 ```
 
 Структурные тесты и сквозной прогон (поднимает локальный тест-сервер и гоняет
@@ -113,13 +126,18 @@ python3 tools/e2e.py
 cargo test
 ```
 
-Загрузка страницы, разбор в DOM и каскад стилей:
+Загрузка страницы, разбор в DOM, каскад стилей и раскладка:
 
 ```text
 ./target/debug/neutral-browser --fetch http://127.0.0.1:18080/index.html --dom
 ./target/debug/neutral-browser --fetch <url> --dom --style --style-output <style.txt>
+./target/debug/neutral-browser --fetch <url> --layout --layout-output <layout.txt>
 ./target/debug/neutral-browser --dom-file <page.html> --style --css-file <user.css> --style-output <style.txt>
+./target/debug/neutral-browser --dom-file <page.html> --layout --css-file <user.css> --layout-output <layout.txt>
 ```
+
+`--layout` подразумевает `--style`: каскад всегда выполняется перед раскладкой
+(блок STYLE в отчёте печатается как при `--style`), затем идёт блок LAYOUT.
 
 `--dom-file` и `--css-file` читают файлы, явно указанные пользователем в его
 собственной командной строке: это действие самого пользователя над своими
