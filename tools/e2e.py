@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end machine verification for neutral-browser (stages 2-4).
+"""End-to-end machine verification for neutral-browser (stages 2-5).
 
 Starts a local HTTP test server, drives the REAL compiled binary and asserts
 its machine output line by line. Verdict per case (E2E_Tn_*=PASS/FAIL) and a
@@ -209,7 +209,7 @@ def main() -> int:
 
         # ---- Stage 4: CSS -> STYLE ----
 
-        EXPECTED_STYLE_DUMP = """STYLE v1
+        EXPECTED_STYLE_DUMP = """STYLE v2
 E5 html>body>p
   color: red
   font-size: 12px
@@ -281,7 +281,7 @@ E9 html>body>span
             '<!doctype html><html><body><p class="a">hi'
             "<div><span>go</span></div></body></html>"
         )
-        EXPECTED_USER_DUMP = """STYLE v1
+        EXPECTED_USER_DUMP = """STYLE v2
 E3 html>body>p
   color: red
 E5 html>body>div>span
@@ -319,6 +319,186 @@ E5 html>body>div>span
             check("E2E_T13B_STYLE_ERROR", o.get("STYLE") == "ERROR", raw)
             check("E2E_T13B_KIND", o.get("ERROR_KIND") == "IO", raw)
             check("E2E_T13B_EXIT5", rc == 5, raw)
+
+        # ---- Stage 5: inheritance + <link> sheets ----
+
+        EXPECTED_INHERIT_DUMP = """STYLE v2
+E4 html>body
+  color: green
+  font-family: monospace
+E5 html>body>div
+  ~color: green
+  ~font-family: monospace
+E6 html>body>div>p
+  text-align: center
+  ~color: green
+  ~font-family: monospace
+E7 html>body>div>p>em
+  border-width: 3px
+  ~color: green
+  ~font-family: monospace
+  ~text-align: center
+E8 html>body>span
+  ~color: green
+  ~font-family: monospace
+"""
+
+        # T14: fetch -> DOM -> cascade -> inheritance -> STYLE (exact dump);
+        # head/body/div inherit color+font-family; em also inherits text-align
+        with tempfile.TemporaryDirectory() as td:
+            out_dump = Path(td) / "inherit.txt"
+            rc, o, raw = run_client(
+                ["--fetch", f"{base}/inherit", "--dom", "--style",
+                 "--style-output", str(out_dump)]
+            )
+            check("E2E_T14_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+            check("E2E_T14_SRC", o.get("STYLE_SRC_ELEMENTS") == "1", raw)
+            check("E2E_T14_LINK", o.get("STYLE_LINK_SHEETS") == "0", raw)
+            check("E2E_T14_RULES", o.get("STYLE_RULES") == "3", raw)
+            check("E2E_T14_DECLS", o.get("STYLE_DECLS") == "4", raw)
+            check("E2E_T14_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "3", raw)
+            check("E2E_T14_PROPS", o.get("STYLE_PROPS") == "4", raw)
+            check("E2E_T14_INHERITED", o.get("STYLE_INHERITED") == "9", raw)
+            check("E2E_T14_INH_EL", o.get("STYLE_INHERITED_ELEMENTS") == "4", raw)
+            check("E2E_T14_STYLE_OK", o.get("STYLE") == "OK", raw)
+            check(
+                "E2E_T14_DUMP_EXACT",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8") == EXPECTED_INHERIT_DUMP,
+                raw,
+            )
+
+        # T15: <link rel=stylesheet> fetched through the broker-gated chain,
+        # parsed and cascaded together with the inline <style> (exact dump)
+        EXPECTED_LINK_DUMP = """STYLE v2
+E6 html>body>p
+  color: green
+  margin: 9px
+  padding: 1px
+"""
+        with tempfile.TemporaryDirectory() as td:
+            out_dump = Path(td) / "link.txt"
+            rc, o, raw = run_client(
+                ["--fetch", f"{base}/styled-link", "--style",
+                 "--style-output", str(out_dump)]
+            )
+            check("E2E_T15_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+            check("E2E_T15_SRC", o.get("STYLE_SRC_ELEMENTS") == "1", raw)
+            check("E2E_T15_LINK", o.get("STYLE_LINK_SHEETS") == "1", raw)
+            check("E2E_T15_FETCHED", o.get("STYLE_LINK_SHEETS_FETCHED") == "1", raw)
+            check("E2E_T15_FAILED", o.get("STYLE_LINK_SHEETS_FAILED") == "0", raw)
+            check(
+                "E2E_T15_URL",
+                f"LINK_SHEET_FETCHED={base}/sheet.css" in raw.splitlines(),
+                raw,
+            )
+            check("E2E_T15_RULES", o.get("STYLE_RULES") == "3", raw)
+            check("E2E_T15_DECLS", o.get("STYLE_DECLS") == "4", raw)
+            check("E2E_T15_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "1", raw)
+            check("E2E_T15_PROPS", o.get("STYLE_PROPS") == "3", raw)
+            check(
+                "E2E_T15_DUMP_EXACT",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8") == EXPECTED_LINK_DUMP,
+                raw,
+            )
+
+            # T15b: chunked-framed stylesheet -> identical cascade
+            rc, o2, raw2 = run_client(
+                ["--fetch", f"{base}/styled-link-chunked", "--style",
+                 "--style-output", str(Path(td) / "link2.txt")]
+            )
+            check("E2E_T15B_FETCH_OK", o2.get("FETCH") == "OK" and rc == 0, raw2)
+            check("E2E_T15B_FETCHED", o2.get("STYLE_LINK_SHEETS_FETCHED") == "1", raw2)
+            check(
+                "E2E_T15B_SAME_DUMP",
+                (Path(td) / "link2.txt").read_text(encoding="utf-8")
+                == EXPECTED_LINK_DUMP,
+                raw2,
+            )
+
+        # T16: document order across sheets — the <link> sheet is later in
+        # the document, so its equal-specificity rule wins
+        with tempfile.TemporaryDirectory() as td:
+            out_dump = Path(td) / "order.txt"
+            rc, o, raw = run_client(
+                ["--fetch", f"{base}/link-order", "--style",
+                 "--style-output", str(out_dump)]
+            )
+            check("E2E_T16_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+            check("E2E_T16_RULES", o.get("STYLE_RULES") == "2", raw)
+            check(
+                "E2E_T16_DUMP",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8")
+                == "STYLE v2\nE6 html>body>b\n  color: blue\n",
+                raw,
+            )
+
+        # T17: broken sheets never abort: 404 / bad URL / unsupported scheme,
+        # each reported with its own machine kind; cascade still runs
+        rc, o, raw = run_client(["--fetch", f"{base}/link-broken", "--style"])
+        check("E2E_T17_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+        check("E2E_T17_LINK", o.get("STYLE_LINK_SHEETS") == "3", raw)
+        check("E2E_T17_FETCHED", o.get("STYLE_LINK_SHEETS_FETCHED") == "0", raw)
+        check("E2E_T17_FAILED", o.get("STYLE_LINK_SHEETS_FAILED") == "3", raw)
+        check("E2E_T17_NO_FETCH", raw.count("LINK_SHEET_FETCHED=") == 0, raw)
+        check("E2E_T17_KIND_404", "LINK_SHEET_KIND=HTTP_404" in raw, raw)
+        check("E2E_T17_KIND_BADURL", "LINK_SHEET_KIND=BAD_URL" in raw, raw)
+        check(
+            "E2E_T17_KIND_SCHEME",
+            "LINK_SHEET_KIND=UNSUPPORTED_SCHEME" in raw,
+            raw,
+        )
+        check("E2E_T17_RULES", o.get("STYLE_RULES") == "0", raw)
+        check("E2E_T17_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "0", raw)
+        check("E2E_T17_STYLE_OK", o.get("STYLE") == "OK", raw)
+
+        # T18: relative/parent/absolute hrefs resolve against the page URL
+        # (dot-segment removal included); rel matching is case-insensitive
+        with tempfile.TemporaryDirectory() as td:
+            out_dump = Path(td) / "rel.txt"
+            rc, o, raw = run_client(
+                ["--fetch", f"{base}/sub/rel.html", "--style",
+                 "--style-output", str(out_dump)]
+            )
+            fetched_urls = [
+                l.split("=", 1)[1]
+                for l in raw.splitlines()
+                if l.startswith("LINK_SHEET_FETCHED=")
+            ]
+            check("E2E_T18_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+            check("E2E_T18_FETCHED", o.get("STYLE_LINK_SHEETS_FETCHED") == "3", raw)
+            check(
+                "E2E_T18_URLS",
+                fetched_urls
+                == [
+                    f"{base}/sub/sheet.css",
+                    f"{base}/root.css",
+                    f"{base}/abs.css",
+                ],
+                raw,
+            )
+            check("E2E_T18_RULES", o.get("STYLE_RULES") == "3", raw)
+            check(
+                "E2E_T18_DUMP",
+                out_dump.exists()
+                and out_dump.read_text(encoding="utf-8")
+                == "STYLE v2\nE7 html>body>p\n  color: teal\n  letter-spacing: 1px\n  text-indent: 4px\n",
+                raw,
+            )
+
+        # T19: the link cap is enforced honestly (MAX_LINK_SHEETS = 8):
+        # 10 distinct sheets -> 8 fetched, 2 reported as LIMIT failures
+        rc, o, raw = run_client(["--fetch", f"{base}/link-cap", "--style"])
+        check("E2E_T19_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+        check("E2E_T19_LINK", o.get("STYLE_LINK_SHEETS") == "10", raw)
+        check("E2E_T19_FETCHED", o.get("STYLE_LINK_SHEETS_FETCHED") == "8", raw)
+        check("E2E_T19_FAILED", o.get("STYLE_LINK_SHEETS_FAILED") == "2", raw)
+        check("E2E_T19_KINDS", raw.count("LINK_SHEET_KIND=LIMIT") == 2, raw)
+        check("E2E_T19_RULES", o.get("STYLE_RULES") == "8", raw)
+        check("E2E_T19_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "1", raw)
+        check("E2E_T19_STYLE_OK", o.get("STYLE") == "OK", raw)
     finally:
         server.terminate()
         try:

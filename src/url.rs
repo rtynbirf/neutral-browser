@@ -153,3 +153,91 @@ pub fn connect_target(u: &Url) -> String {
         format!("{}:{}", u.host, u.port)
     }
 }
+
+/// Origin string "scheme://host[:port]" (bracketed IPv6), re-parseable by
+/// `parse`. The port is omitted only when it is the scheme default.
+fn origin(u: &Url) -> String {
+    let host = if u.host.contains(':') {
+        format!("[{}]", u.host)
+    } else {
+        u.host.clone()
+    };
+    if default_port(&u.scheme) == Some(u.port) {
+        format!("{}://{}", u.scheme, host)
+    } else {
+        format!("{}://{}:{}", u.scheme, host, u.port)
+    }
+}
+
+/// RFC 3986 §5.2.4 subset for absolute paths: "." segments are dropped,
+/// ".." pops the previous segment (staying at the root when already there),
+/// interior empty segments collapse, a trailing "."/".." yields a trailing
+/// slash, empty result becomes "/".
+fn remove_dot_segments(path: &str) -> String {
+    debug_assert!(path.starts_with('/'));
+    let mut out: Vec<&str> = Vec::new();
+    let mut trailing_slash = false;
+    for seg in path.split('/').skip(1) {
+        match seg {
+            "." | "" => trailing_slash = true,
+            ".." => {
+                out.pop();
+                trailing_slash = true;
+            }
+            _ => {
+                out.push(seg);
+                trailing_slash = false;
+            }
+        }
+    }
+    let mut s = String::from("/");
+    s.push_str(&out.join("/"));
+    if trailing_slash && !s.ends_with('/') {
+        s.push('/');
+    }
+    s
+}
+
+/// Resolve a stylesheet link href against the base URL — a documented
+/// subset of RFC 3986 §5:
+///   - empty href = the base URL itself (fragment stripped)
+///   - absolute URI passthrough (contains "://"; the fetch validates it)
+///   - scheme-relative "//host/path" inherits the base scheme
+///   - absolute path "/path" merges onto the base origin
+///   - query-only "?q" merges onto the base path without its query
+///   - relative path merges onto the base directory with dot-segment
+///     removal; a colon inside a relative href stays in the path (no
+///     scheme sniffing — documented deviation)
+///   - fragments are always dropped; no percent-decoding, no backslash
+///     magic, no userinfo
+/// Returns None when the href cannot yield a fetchable URL (control or
+/// non-graphic characters).
+pub fn resolve(base: &Url, href: &str) -> Option<String> {
+    let h = href.trim_matches(|c: char| c.is_ascii_whitespace());
+    let h = match h.find('#') {
+        Some(i) => &h[..i],
+        None => h,
+    };
+    if h.is_empty() {
+        return Some(format!("{}{}", origin(base), base.path));
+    }
+    if !h.chars().all(|c| c.is_ascii_graphic()) {
+        return None;
+    }
+    if h.contains("://") {
+        return Some(h.to_string());
+    }
+    if h.starts_with("//") {
+        return Some(format!("{}:{}", base.scheme, h));
+    }
+    if h.starts_with('/') {
+        return Some(format!("{}{}", origin(base), remove_dot_segments(h)));
+    }
+    let bp = base.path.split('?').next().unwrap_or("/");
+    if h.starts_with('?') {
+        return Some(format!("{}{}{}", origin(base), bp, h));
+    }
+    let dir_end = bp.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let merged = format!("{}{}", &bp[..dir_end], h);
+    Some(format!("{}{}", origin(base), remove_dot_segments(&merged)))
+}

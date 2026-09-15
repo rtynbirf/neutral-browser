@@ -135,7 +135,7 @@ pub fn fetch(
 
     // HTTP/1.1 request (RFC 9110 subset; no HTTP/2, no TLS in this stage).
     let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: neutral-browser/0.3.0\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: neutral-browser/0.6.0\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         parsed.path,
         url::host_header(&parsed)
     );

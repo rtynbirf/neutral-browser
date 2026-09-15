@@ -1,10 +1,12 @@
-//! neutral-browser — user-owned browser, stage 4: CSS -> STYLE.
+//! neutral-browser — user-owned browser, stage 5: computed STYLE.
 //!
 //! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> CSS -> STYLE.
 //! Nothing is done implicitly: the network is touched only by --fetch;
 //! parsing happens on the fetched body (--dom/--style) or on the user's own
 //! files (--dom-file/--css-file, the user is the principal — not a web
-//! capability).
+//! capability). Stage 5: <link rel=stylesheet> sheets are fetched through
+//! the same broker-gated chain (base URL from --fetch only), and inherited
+//! properties propagate computed values down the DOM (STYLE v2 dump).
 
 mod broker;
 mod css;
@@ -21,7 +23,11 @@ use std::process::exit;
 use broker::Broker;
 use policy::{Capability, Decision, Policy};
 
-const VERSION: &str = "0.5.0";
+const VERSION: &str = "0.6.0";
+
+/// Cap on distinct <link rel=stylesheet> sheets fetched per page: link
+/// fetches are engine-triggered network I/O and must stay bounded.
+const MAX_LINK_SHEETS: usize = 8;
 
 fn main() {
     exit(run());
@@ -55,10 +61,10 @@ fn run() -> i32 {
         return fetch_command(&args, &raw);
     }
     println!("neutral-browser {}", VERSION);
-    println!("STATUS=STAGE4_STYLE");
+    println!("STATUS=STAGE5_COMPUTED");
     println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE");
     println!(
-        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-inheritance,css-link-stylesheets,css-advanced-selectors,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
+        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
     );
     println!(
         "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--dom-output <f>] [--style-output <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--css-file <path>] [--dom-output <f>] [--style-output <f>] | --self-test"
@@ -96,6 +102,9 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
             &r.dom,
             flag(args, "--css-file").as_deref(),
             flag(args, "--style-output").as_deref(),
+            None,
+            std::time::Duration::ZERO,
+            None,
         );
     }
     0
@@ -137,23 +146,120 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
-/// Stage 4: cascade the stylesheet over the DOM and report STYLE.
-/// CSS sources: <style> elements inside the DOM (inline) and, when given,
-/// the user's own CSS file (--css-file, the user is the principal).
-/// CSS parse errors do not abort (CSS recovery is normative); only a file
-/// I/O failure or a dump write failure aborts with exit code 5.
-fn style_stage(tree: &dom::Dom, css_file: Option<&str>, style_output: Option<&str>) -> i32 {
-    let (sheet_text, src_elems) = css::collect_style_text(tree);
+/// Outcome of one <link rel=stylesheet> sheet acquisition.
+enum LinkOutcome {
+    Fetched(String, String), // body text, resolved url
+    Failed(String),          // machine kind
+}
+
+/// Fetch one link sheet through the broker-gated chain. Resolve the href
+/// against the page base URL (only --fetch provides one), dedupe and cap
+/// upstream. A failed sheet never aborts the cascade — it is counted.
+fn link_sheet(
+    href: &str,
+    base: Option<&url::Url>,
+    timeout: std::time::Duration,
+    subject_override: Option<&str>,
+) -> LinkOutcome {
+    let Some(b) = base else {
+        return LinkOutcome::Failed("NO_BASE_URL".into());
+    };
+    if href.is_empty() {
+        return LinkOutcome::Failed("NO_HREF".into());
+    }
+    let Some(u) = url::resolve(b, href) else {
+        return LinkOutcome::Failed("BAD_URL".into());
+    };
+    match network::fetch(&u, subject_override, timeout) {
+        Ok(rep) if rep.status == 200 => {
+            LinkOutcome::Fetched(String::from_utf8_lossy(&rep.body).into_owned(), u)
+        }
+        Ok(rep) => LinkOutcome::Failed(format!("HTTP_{}", rep.status)),
+        Err(e) => LinkOutcome::Failed(e.code().to_string()),
+    }
+}
+
+/// Sanitize an href for the report: control characters become '?'.
+fn display_href(h: &str) -> String {
+    h.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
+/// Stage 5: cascade the stylesheets over the DOM and report STYLE.
+/// CSS sources, in document order: <style> elements and <link rel=stylesheet>
+/// sheets fetched over the same broker-gated chain (base URL comes only
+/// from --fetch); after them the user's own --css-file (user principal).
+/// Sheets are parsed in document order — the cascade source order spans
+/// all sheets. CSS parse errors and failed link sheets never abort (both
+/// are counted); only file I/O failures (css file, dump write) exit 5.
+fn style_stage(
+    tree: &dom::Dom,
+    css_file: Option<&str>,
+    style_output: Option<&str>,
+    base: Option<&url::Url>,
+    timeout: std::time::Duration,
+    subject_override: Option<&str>,
+) -> i32 {
+    let list = css::collect_sheets(tree);
     let mut rules = Vec::new();
     let mut errors = 0usize;
     let mut at_skip = 0usize;
     let mut decls_total = 0usize;
-    let out = css::parse(&sheet_text);
-    decls_total += out.decl_count();
-    rules.extend(out.rules);
-    errors += out.errors;
-    at_skip += out.at_rules_skipped;
-    println!("STYLE_SRC_ELEMENTS={}", src_elems);
+
+    println!("STYLE_SRC_ELEMENTS={}", list.style_elems);
+    println!("STYLE_LINK_SHEETS={}", list.link_elems);
+
+    let mut fetched = 0usize;
+    let mut failed = 0usize;
+    let mut dupes = 0usize;
+    let mut attempts = 0usize;
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for sheet in &list.sheets {
+        match sheet {
+            css::SheetRef::Inline(text) => {
+                let o = css::parse(text);
+                decls_total += o.decl_count();
+                rules.extend(o.rules);
+                errors += o.errors;
+                at_skip += o.at_rules_skipped;
+            }
+            css::SheetRef::Link { href } => {
+                if !href.is_empty() {
+                    if let Some(u) = base.and_then(|b| url::resolve(b, href)) {
+                        if !seen.insert(u.clone()) {
+                            dupes += 1;
+                            continue; // same URL: one sheet, browser-style dedupe
+                        }
+                    }
+                }
+                if attempts >= MAX_LINK_SHEETS {
+                    failed += 1;
+                    println!("LINK_SHEET_FAIL={}", display_href(href));
+                    println!("LINK_SHEET_KIND=LIMIT");
+                    continue;
+                }
+                attempts += 1;
+                match link_sheet(href, base, timeout, subject_override) {
+                    LinkOutcome::Fetched(text, u) => {
+                        fetched += 1;
+                        println!("LINK_SHEET_FETCHED={}", u);
+                        let o = css::parse(&text);
+                        decls_total += o.decl_count();
+                        rules.extend(o.rules);
+                        errors += o.errors;
+                        at_skip += o.at_rules_skipped;
+                    }
+                    LinkOutcome::Failed(kind) => {
+                        failed += 1;
+                        println!("LINK_SHEET_FAIL={}", display_href(href));
+                        println!("LINK_SHEET_KIND={}", kind);
+                    }
+                }
+            }
+        }
+    }
+    println!("STYLE_LINK_SHEETS_FETCHED={}", fetched);
+    println!("STYLE_LINK_SHEETS_FAILED={}", failed);
+    println!("STYLE_LINK_DUPES={}", dupes);
     if let Some(p) = css_file {
         let bytes = match std::fs::read(p) {
             Ok(b) => b,
@@ -178,6 +284,8 @@ fn style_stage(tree: &dom::Dom, css_file: Option<&str>, style_output: Option<&st
     let ap = css::apply(tree, &rules);
     println!("STYLE_ELEMENTS_STYLED={}", ap.styled);
     println!("STYLE_PROPS={}", ap.props);
+    println!("STYLE_INHERITED={}", ap.inherited);
+    println!("STYLE_INHERITED_ELEMENTS={}", ap.inherited_elements);
     if let Some(out_path) = style_output {
         match std::fs::write(&out_path, css::dump(&ap)) {
             Ok(_) => println!("STYLE_SAVED={}", out_path),
@@ -260,6 +368,9 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                         &r.dom,
                         flag(args, "--css-file").as_deref(),
                         flag(args, "--style-output").as_deref(),
+                        Some(&rep.url),
+                        timeout,
+                        subject_override.as_deref(),
                     );
                     if rc != 0 {
                         return rc;
@@ -591,9 +702,63 @@ fn self_test() -> i32 {
     let ap = css::apply(&doc.dom, &o.rules);
     assert_eq!(
         css::dump(&ap),
-        "STYLE v1\nE3 html>body>p\n  color: red\n  margin: 0\n"
+        "STYLE v2\nE3 html>body>p\n  color: red\n  margin: 0\n"
     );
     println!("CSS_CASCADE=PASS");
+
+    // ---- Stage 5: URL resolution for link sheets ----
+    let b = url::parse("http://127.0.0.1:18080/dir/page.html?x=1").unwrap();
+    assert_eq!(
+        url::resolve(&b, "http://other.test/a.css").as_deref(),
+        Some("http://other.test/a.css")
+    );
+    assert_eq!(
+        url::resolve(&b, "//other.test/a.css").as_deref(),
+        Some("http://other.test/a.css")
+    );
+    assert_eq!(
+        url::resolve(&b, "/root.css").as_deref(),
+        Some("http://127.0.0.1:18080/root.css")
+    );
+    assert_eq!(
+        url::resolve(&b, "sheet.css").as_deref(),
+        Some("http://127.0.0.1:18080/dir/sheet.css")
+    );
+    assert_eq!(
+        url::resolve(&b, "../up.css").as_deref(),
+        Some("http://127.0.0.1:18080/up.css")
+    );
+    assert_eq!(
+        url::resolve(&b, "?y=2").as_deref(),
+        Some("http://127.0.0.1:18080/dir/page.html?y=2")
+    );
+    assert_eq!(
+        url::resolve(&b, "s.css#frag").as_deref(),
+        Some("http://127.0.0.1:18080/dir/s.css")
+    );
+    assert_eq!(
+        url::resolve(&b, "").as_deref(),
+        Some("http://127.0.0.1:18080/dir/page.html?x=1")
+    );
+    assert_eq!(
+        url::resolve(&b, "/a/../b.css").as_deref(),
+        Some("http://127.0.0.1:18080/b.css")
+    );
+    assert_eq!(url::resolve(&b, "a b.css"), None); // space in path
+    assert_eq!(url::resolve(&b, "a\tb.css"), None); // control char
+    println!("URL_RESOLVE=PASS");
+
+    // ---- Stage 5: inheritance (computed values propagate down the tree) ----
+    let doc = dom::build("<html><body><div><p>x<em>e</em></p></div><span>s</span>");
+    let o = css::parse(
+        "body { color: green } div > p { text-align: center } em { border-width: 3px }",
+    );
+    let ap = css::apply(&doc.dom, &o.rules);
+    assert_eq!(ap.styled, 3); // body, p, em carry own decls
+    assert_eq!(ap.inherited, 5); // div, p, em(x2), span receive values
+    assert_eq!(ap.inherited_elements, 4);
+    assert!(css::is_inherited("color") && !css::is_inherited("margin"));
+    println!("CSS_INHERIT=PASS");
 
     0
 }

@@ -179,3 +179,62 @@ in the README status table, not hidden.
 
 
 
+## Stage 5: inheritance + <link> sheets -> computed STYLE (v0.6.0)
+
+Stage 5 deepens the STYLE link of the master chain with two capabilities,
+both reusing verified components — no new Cargo dependencies:
+
+```
+URL -> BROKER -> TCP -> HTTP/1.1 -> BODY -> HTML -> DOM
+                                                     |
+             +---------------------------------------+
+             |
+      SHEET COLLECTION (document order)            css::collect_sheets (pure)
+             <style> -> Inline(raw text)            rel must contain "stylesheet"
+             <link rel=stylesheet> -> Link(href)    and not "alternate" (case-free)
+             |
+             v
+      LINK RESOLUTION (main.rs, I/O boundary)      url::resolve(base, href)
+             absolute / //host / /path / rel+dot-segments / ?query / empty
+             fragment dropped; non-graphic ASCII -> counted BAD_URL
+             |
+             v
+      network::fetch (SAME broker-gated chain)     capability derived per sheet URL
+             dedupe by resolved URL, MAX_LINK_SHEETS = 8
+             failure kinds: NO_BASE_URL / NO_HREF / BAD_URL / HTTP_<status> /
+             UNSUPPORTED_SCHEME / DNS / CONNECT / IO / LIMIT
+             a failed sheet never aborts the cascade — counted + one machine line
+             |
+             v
+      CASCADE (per sheet parse, document order)    source order spans all sheets
+             |
+             v
+      INHERITANCE (css.rs, pure, iterative)        is_inherited(): frozen 28-prop subset
+             child gets the parent's COMPUTED value; own cascade winner overrides;
+             non-inherited properties never propagate; NO initial values
+             |
+             v
+      STYLE RESULT
+             +--> counters: STYLE_SRC_ELEMENTS / STYLE_LINK_SHEETS(_FETCHED/_FAILED)
+             |              STYLE_LINK_DUPES / RULES / DECLS / AT_RULES_SKIPPED /
+             |              ERRORS / ELEMENTS_STYLED / PROPS / STYLE_INHERITED(_ELEMENTS)
+             +--> canonical dump "STYLE v2" (frozen): own `name: value` lines then
+                  `~name: value` lines for received values, both alphabetical
+```
+
+Security/purity invariants held: `css.rs` still performs zero I/O — it only
+DESCRIBES link sheets (`SheetRef::Link { href }`); the actual fetch lives in
+`main.rs` and goes through the same broker-gated `network::fetch` with the
+capability derived by the engine from the sheet's own URL. Link fetching is
+possible only with `--fetch` (a base URL exists); `--dom-file` reports
+`NO_BASE_URL` per link. The per-page cap (8 unique sheets) and the URL
+dedupe bound engine-triggered network I/O.
+
+Documented subset deviations (honest, machine-visible): `media`/`disabled`
+attributes are ignored (every collected sheet applies); `@import` inside a
+fetched sheet is NOT followed (fetch depth = 1); `inherit`/`initial`/
+`unset`/`revert` keywords stay verbatim values; there are no initial values
+— an inherited property without an ancestor value stays absent (honest
+absence, not an invented defaults table); a colon inside a relative href
+stays in the path (no scheme sniffing); the `User-Agent` now reports the
+current version. All of the above is listed in the README status table.

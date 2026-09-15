@@ -6,6 +6,19 @@ Endpoints:
   /chunked          -> 200, Transfer-Encoding: chunked, same PAGE bytes in 2 chunks
   /styled           -> 200, page with a <style> element (stage 4)
   /styled-chunked   -> 200, chunked framing of the styled page
+  /inherit          -> 200, page exercising CSS inheritance (stage 5)
+  /styled-link      -> 200, page with <link rel=stylesheet> + <style> (stage 5)
+  /styled-link-chunked -> same page, sheet URL uses chunked framing
+  /sheet.css        -> 200, stylesheet body for /styled-link
+  /sheet-chunked    -> 200, same stylesheet body, chunked framing
+  /late.css         -> 200, stylesheet fetched AFTER the inline <style>
+  /link-order       -> 200, <style> then <link>: the later sheet wins
+  /link-broken      -> 200, three broken links (404 / bad URL / https)
+  /link-cap         -> 200, ten distinct stylesheet links (cap = 8)
+  /capN.css (1..10) -> 200, distinct stylesheets for the cap test
+  /sub/rel.html     -> 200, relative + ../ + absolute link hrefs
+  /sub/sheet.css    -> 200, stylesheet for /sub/rel.html
+  /root.css, /abs.css -> 200, stylesheets for /sub/rel.html
   anything else     -> 404, short plain-text body
 
 No third-party modules. No telemetry. Binds 127.0.0.1 only.
@@ -37,6 +50,64 @@ STYLED = (
     b'</body></html>'
 )
 
+INHERIT = (
+    b'<!doctype html><html><head><title>i</title><style>'
+    b'body { color: green; font-family: monospace }'
+    b'div > p { text-align: center }'
+    b'p em { border-width: 3px }'
+    b'</style></head><body>'
+    b'<div><p>para<em>em</em></p></div>'
+    b'<span>out</span>'
+    b'</body></html>'
+)
+
+STYLED_LINK = (
+    b'<!doctype html><html><head><title>t</title>'
+    b'<link rel="stylesheet" href="/sheet.css">'
+    b'<style>p { margin: 9px }</style></head>'
+    b'<body><p class="c">x</p></body></html>'
+)
+
+STYLED_LINK_CHUNKED = STYLED_LINK.replace(b'href="/sheet.css"', b'href="/sheet-chunked"')
+
+LINK_ORDER = (
+    b'<!doctype html><html><head><title>t</title>'
+    b'<style>.z { color: red }</style>'
+    b'<link rel="stylesheet" href="/late.css"></head>'
+    b'<body><b class="z">x</b></body></html>'
+)
+
+LINK_BROKEN = (
+    b'<!doctype html><html><head><title>t</title>'
+    b'<link rel="stylesheet" href="/missing.css">'
+    b'<link rel="stylesheet" href="bad href.css">'
+    b'<link rel="stylesheet" href="https://127.0.0.1/x.css">'
+    b'</head><body><p>x</p></body></html>'
+)
+
+LINK_CAP = (
+    b'<!doctype html><html><head><title>t</title>'
+    + b"".join(
+        b'<link rel="stylesheet" href="/cap%d.css">' % i for i in range(1, 11)
+    )
+    + b'</head><body><p>x</p></body></html>'
+)
+
+REL_PAGE = (
+    b'<!doctype html><html><head><title>t</title>'
+    b'<link rel="STYLESHEET" href="sheet.css">'
+    b'<link rel="stylesheet" href="../root.css">'
+    b'<link rel="stylesheet" href="/abs.css"></head>'
+    b'<body><p>x</p></body></html>'
+)
+
+SHEET_CSS = b"p { color: red }\n.c { color: green; padding: 1px }\n"
+LATE_CSS = b".z { color: blue }\n"
+ROOT_CSS = b"p { color: teal }\n"
+ABS_CSS = b"p { letter-spacing: 1px }\n"
+SUB_SHEET_CSS = b"p { text-indent: 4px }\n"
+CAP_CSS = b"p { color: red }\n"
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -57,6 +128,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_chunked(STYLED, "text/html; charset=utf-8")
         elif self.path == "/chunked":
             self._send_chunked(PAGE, "text/html; charset=utf-8")
+        elif self.path == "/inherit":
+            self._send_fixed(200, INHERIT, "text/html; charset=utf-8")
+        elif self.path == "/styled-link":
+            self._send_fixed(200, STYLED_LINK, "text/html; charset=utf-8")
+        elif self.path == "/styled-link-chunked":
+            self._send_fixed(200, STYLED_LINK_CHUNKED, "text/html; charset=utf-8")
+        elif self.path == "/sheet.css":
+            self._send_fixed(200, SHEET_CSS, "text/css")
+        elif self.path == "/sheet-chunked":
+            self._send_chunked(SHEET_CSS, "text/css")
+        elif self.path == "/late.css":
+            self._send_fixed(200, LATE_CSS, "text/css")
+        elif self.path == "/link-order":
+            self._send_fixed(200, LINK_ORDER, "text/html; charset=utf-8")
+        elif self.path == "/link-broken":
+            self._send_fixed(200, LINK_BROKEN, "text/html; charset=utf-8")
+        elif self.path == "/link-cap":
+            self._send_fixed(200, LINK_CAP, "text/html; charset=utf-8")
+        elif self.path.startswith("/cap") and self.path.endswith(".css"):
+            self._send_fixed(200, CAP_CSS, "text/css")
+        elif self.path == "/sub/rel.html":
+            self._send_fixed(200, REL_PAGE, "text/html; charset=utf-8")
+        elif self.path == "/sub/sheet.css":
+            self._send_fixed(200, SUB_SHEET_CSS, "text/css")
+        elif self.path == "/root.css":
+            self._send_fixed(200, ROOT_CSS, "text/css")
+        elif self.path == "/abs.css":
+            self._send_fixed(200, ABS_CSS, "text/css")
         else:
             self._send_fixed(404, b"not found", "text/plain")
 

@@ -18,7 +18,15 @@
 //!   the verbatim source span (comments stripped, ends trimmed), whitespace
 //!   inside is not collapsed
 //! - cascade: author origin only; winner = max(important, inline, specificity,
-//!   source order); no inheritance, no shorthand expansion, no var()
+//!   source order); no shorthand expansion, no var(), no inherit/initial/
+//!   unset/revert keywords (their values stay verbatim)
+//! - inheritance (stage 5): a frozen subset of inherited properties
+//!   (`is_inherited`) propagates the parent's computed value down the tree;
+//!   no initial values — an inherited property with no ancestor value stays
+//!   absent; the dump marks received values with a `~` prefix (STYLE v2)
+//! - sheet collection (stage 5): `collect_sheets` yields <style> texts and
+//!   <link rel=stylesheet> href descriptors in document order; fetching link
+//!   sheets is I/O and lives in main.rs (this module stays pure)
 //! - a lone "-" is a Delim; a number immediately followed by "-" does not
 //!   become a dimension (custom-property units are not supported)
 
@@ -1201,23 +1209,31 @@ fn best_specificity(dom: &Dom, el: NodeId, sels: &[Selector]) -> Option<(u32, u3
 pub struct StyledElem {
     pub index: usize, // element ordinal in document order (0-based)
     pub path: String, // element names from the root, '>'-joined
-    pub decls: Vec<(String, String)>, // alphabetically sorted by name
+    pub decls: Vec<(String, String)>, // own cascaded winners, alphabetical
+    pub inherited: Vec<(String, String)>, // values received from ancestors
 }
 
 #[derive(Debug, Default)]
 pub struct StyleApply {
-    pub elements: Vec<StyledElem>, // only elements with >=1 declaration
-    pub styled: usize,
-    pub props: usize,
-    pub inline_errors: usize, // parse errors of inline style attributes
+    pub elements: Vec<StyledElem>, // elements with >=1 own or inherited value
+    pub styled: usize,             // elements with >=1 own cascaded property
+    pub props: usize,              // total own cascaded properties
+    pub inline_errors: usize,      // parse errors of inline style attributes
+    pub inherited: usize,          // total inherited (~) values materialized
+    pub inherited_elements: usize, // elements carrying >=1 inherited value
 }
 
-/// Apply the cascade (author origin) to every element of the tree.
-/// Winner per property = max over the key
+/// Apply the cascade (author origin) plus inheritance to every element.
+/// Cascade winner per property = max over the key
 /// (important, inline, specificity, source order), applied ascending.
+/// Inheritance: for every `is_inherited` property not set on the element
+/// itself, the parent's computed value propagates (CSS: inherited value =
+/// the parent's computed value); no initial values exist in this subset.
 pub fn apply(dom: &Dom, rules: &[Rule]) -> StyleApply {
     let mut ap = StyleApply::default();
     let mut path: Vec<String> = Vec::new();
+    // computed inherited maps along the current element path
+    let mut maps: Vec<BTreeMap<String, String>> = Vec::new();
     // (id, entering); enter marker pushed after the exit marker like dom::dump
     let mut stack: Vec<(NodeId, bool)> = dom.nodes[0]
         .children
@@ -1237,7 +1253,9 @@ pub fn apply(dom: &Dom, rules: &[Rule]) -> StyleApply {
                 path.push(name);
                 let index = elem_index;
                 elem_index += 1;
-                style_element(dom, id, index, &path, rules, &mut ap);
+                let parent = maps.last().cloned().unwrap_or_default();
+                let computed = style_element(dom, id, index, &path, rules, &mut ap, &parent);
+                maps.push(computed);
             }
             for &c in dom.nodes[id].children.iter().rev() {
                 stack.push((c, false));
@@ -1245,6 +1263,7 @@ pub fn apply(dom: &Dom, rules: &[Rule]) -> StyleApply {
             }
         } else if matches!(dom.nodes[id].data, NodeData::Element { .. }) {
             path.pop();
+            maps.pop();
         }
     }
     ap
@@ -1259,7 +1278,8 @@ fn style_element(
     path: &[String],
     rules: &[Rule],
     ap: &mut StyleApply,
-) {
+    parent_inherited: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let mut entries: Vec<(CascadeKey, &Decl)> = Vec::new();
     for r in rules {
         if let Some(spec) = best_specificity(dom, id, &r.selectors) {
@@ -1284,64 +1304,182 @@ fn style_element(
             }
         }
     }
+    // start from the parent's computed values; own winners of inherited
+    // properties override them, everything else propagates unchanged
+    let mut computed = parent_inherited.clone();
     if entries.is_empty() {
-        return;
+        if !computed.is_empty() {
+            let inherited: Vec<(String, String)> =
+                computed.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            ap.inherited += inherited.len();
+            ap.inherited_elements += 1;
+            ap.elements.push(StyledElem {
+                index,
+                path: path.join(">"),
+                decls: Vec::new(),
+                inherited,
+            });
+        }
+        return computed;
     }
     entries.sort_by_key(|e| e.0);
     let mut m: BTreeMap<&str, &str> = BTreeMap::new();
     for (_, d) in &entries {
         m.insert(d.name.as_str(), d.value.as_str());
     }
+    for (k, v) in &m {
+        if is_inherited(k) {
+            computed.insert((*k).to_string(), (*v).to_string());
+        }
+    }
     let decls: Vec<(String, String)> = m
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
+    let inherited: Vec<(String, String)> = computed
+        .iter()
+        .filter(|(k, _)| !m.contains_key(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     ap.props += decls.len();
     ap.styled += 1;
+    ap.inherited += inherited.len();
+    if !inherited.is_empty() {
+        ap.inherited_elements += 1;
+    }
     ap.elements.push(StyledElem {
         index,
         path: path.join(">"),
         decls,
+        inherited,
     });
+    computed
 }
 
 /// Frozen dump format (machine-verified by tests):
-/// `STYLE v1` header; one `E<index> <path>` line per styled element in
-/// document order; two-space indented `name: value` lines (alphabetical).
+/// `STYLE v2` header; one `E<index> <path>` line per styled element in
+/// document order; two-space indented own `name: value` lines (alphabetical)
+/// followed by two-space indented `~name: value` lines for values received
+/// from ancestors (alphabetical). Elements with neither own nor inherited
+/// values are absent.
 pub fn dump(ap: &StyleApply) -> String {
-    let mut s = String::from("STYLE v1\n");
+    let mut s = String::from("STYLE v2\n");
     for e in &ap.elements {
         s.push_str(&format!("E{} {}\n", e.index, e.path));
         for (k, v) in &e.decls {
             s.push_str(&format!("  {}: {}\n", k, v));
         }
+        for (k, v) in &e.inherited {
+            s.push_str(&format!("  ~{}: {}\n", k, v));
+        }
     }
     s
 }
 
-/// Concatenated text of all `<style>` elements (document order, joined
-/// with newlines) + their count. External stylesheets are NOT fetched.
-pub fn collect_style_text(dom: &Dom) -> (String, usize) {
-    let mut parts: Vec<String> = Vec::new();
-    let mut count = 0;
+// ---------------- inheritance ----------------
+
+/// Frozen subset of properties whose computed value inherits to descendants
+/// (CSS 2.1 text/font/list/table basics). Everything else does NOT inherit
+/// in this engine, and there are no initial values: an inherited property
+/// with no ancestor value simply stays absent (documented subset).
+pub fn is_inherited(name: &str) -> bool {
+    matches!(
+        name,
+        "color"
+            | "direction"
+            | "font"
+            | "font-family"
+            | "font-size"
+            | "font-style"
+            | "font-variant"
+            | "font-weight"
+            | "letter-spacing"
+            | "line-height"
+            | "list-style"
+            | "list-style-image"
+            | "list-style-position"
+            | "list-style-type"
+            | "quotes"
+            | "text-align"
+            | "text-indent"
+            | "text-transform"
+            | "visibility"
+            | "white-space"
+            | "word-spacing"
+            | "border-collapse"
+            | "border-spacing"
+            | "caption-side"
+            | "empty-cells"
+            | "cursor"
+            | "orphans"
+            | "widows"
+    )
+}
+
+// ---------------- sheet collection (document order) ----------------
+
+/// A stylesheet source descriptor collected from the DOM. `Inline` carries
+/// the raw text of one `<style>` element; `Link` carries the (possibly
+/// empty) href attribute of a `<link rel="stylesheet">` element. Fetching
+/// `Link` sheets is I/O and happens in main.rs — this module stays pure.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SheetRef {
+    Inline(String),
+    Link { href: String },
+}
+
+#[derive(Debug, Default)]
+pub struct SheetList {
+    pub sheets: Vec<SheetRef>, // document order
+    pub style_elems: usize,    // <style> elements found
+    pub link_elems: usize,     // <link rel=stylesheet> elements found
+}
+
+/// A link is auto-applied when its rel token list contains "stylesheet"
+/// (case-insensitive) and does not contain "alternate" (alternate
+/// stylesheets are user-selected, never auto-applied — documented subset).
+fn is_stylesheet_link(attrs: &[(String, String)]) -> bool {
+    let Some(rel) = attr_val(attrs, "rel") else {
+        return false;
+    };
+    let toks: Vec<&str> = rel.split_ascii_whitespace().collect();
+    toks.iter().any(|t| t.eq_ignore_ascii_case("stylesheet"))
+        && !toks.iter().any(|t| t.eq_ignore_ascii_case("alternate"))
+}
+
+/// Collect stylesheet sources in document order. `<style>` yields its raw
+/// text children concatenated; `<link rel="stylesheet">` yields a Link
+/// descriptor (empty href when the attribute is missing — the caller counts
+/// and reports it as a failure). `media`/`disabled` attributes are ignored:
+/// every collected sheet participates (documented subset).
+pub fn collect_sheets(dom: &Dom) -> SheetList {
+    let mut out = SheetList::default();
     let mut stack: Vec<NodeId> = dom.nodes[0].children.iter().rev().copied().collect();
     while let Some(id) = stack.pop() {
-        if let NodeData::Element { name, .. } = &dom.nodes[id].data {
+        if let NodeData::Element { name, attrs, .. } = &dom.nodes[id].data {
             if name == "style" {
-                count += 1;
+                out.style_elems += 1;
+                let mut text = String::new();
                 for &c in &dom.nodes[id].children {
                     if let NodeData::Text(t) = &dom.nodes[c].data {
-                        parts.push(t.clone());
+                        text.push_str(t);
                     }
                 }
+                out.sheets.push(SheetRef::Inline(text));
                 continue; // raw text content: no traversal inside
+            }
+            if name == "link" && is_stylesheet_link(attrs) {
+                out.link_elems += 1;
+                let href = attr_val(attrs, "href").unwrap_or("").to_string();
+                out.sheets.push(SheetRef::Link { href });
+                continue; // void element
             }
         }
         for &c in dom.nodes[id].children.iter().rev() {
             stack.push(c);
         }
     }
-    (parts.join("\n"), count)
+    out
 }
 
 // ---------------- tests ----------------
@@ -1598,16 +1736,129 @@ mod tests {
         let ap = apply(&doc.dom, &o.rules);
         assert_eq!(
             dump(&ap),
-            "STYLE v1\nE3 html>body>p\n  color: red\n  margin: 0\n"
+            "STYLE v2\nE3 html>body>p\n  color: red\n  margin: 0\n"
         );
     }
 
     #[test]
-    fn collect_style_text_order() {
-        let doc = crate::dom::build("<style>p{color:red}</style><style>.x{y:1}</style>");
-        let (t, n) = collect_style_text(&doc.dom);
-        assert_eq!(n, 2);
-        assert_eq!(t, "p{color:red}\n.x{y:1}");
+    fn collect_sheets_order_and_rel() {
+        let doc = crate::dom::build(
+            "<style>a{x:1}</style><link rel=\"stylesheet\" href=\"/a.css\">\
+             <style>b{y:2}</style><link REL=\"STYLESHEET\" href=\"/b.css\">\
+             <link rel=\"alternate stylesheet\" href=\"/c.css\">\
+             <link rel=\"stylesheet\"><link href=\"/d.css\">",
+        );
+        let l = collect_sheets(&doc.dom);
+        assert_eq!(l.style_elems, 2);
+        assert_eq!(l.link_elems, 3); // a, b and the href-less one; c (alternate) and d (no rel) do not match
+        assert_eq!(l.sheets.len(), 5);
+        assert_eq!(l.sheets[0], SheetRef::Inline("a{x:1}".into()));
+        assert_eq!(l.sheets[1], SheetRef::Link { href: "/a.css".into() });
+        assert_eq!(l.sheets[2], SheetRef::Inline("b{y:2}".into()));
+        assert_eq!(l.sheets[3], SheetRef::Link { href: "/b.css".into() });
+        assert_eq!(l.sheets[4], SheetRef::Link { href: "".into() });
+    }
+
+    #[test]
+    fn is_inherited_table() {
+        for p in [
+            "color",
+            "font",
+            "font-size",
+            "line-height",
+            "text-align",
+            "visibility",
+            "white-space",
+            "cursor",
+        ] {
+            assert!(is_inherited(p));
+        }
+        for p in ["margin", "border", "padding", "width", "display", "background"] {
+            assert!(!is_inherited(p));
+        }
+    }
+
+    #[test]
+    fn inheritance_basic_and_dump_v2() {
+        let doc =
+            crate::dom::build("<html><body><div><p>x<em>e</em></p></div><span>s</span>");
+        let o = parse(
+            "body { color: green } div > p { text-align: center } em { border-width: 3px }",
+        );
+        let ap = apply(&doc.dom, &o.rules);
+        // body and p and em have own decls; div/p/em/span carry inherited ones
+        assert_eq!(ap.styled, 3);
+        assert_eq!(ap.props, 3);
+        assert_eq!(ap.inherited, 5);
+        assert_eq!(ap.inherited_elements, 4);
+        assert_eq!(
+            dump(&ap),
+            concat!(
+                "STYLE v2\n",
+                "E2 html>body\n",
+                "  color: green\n",
+                "E3 html>body>div\n",
+                "  ~color: green\n",
+                "E4 html>body>div>p\n",
+                "  text-align: center\n",
+                "  ~color: green\n",
+                "E5 html>body>div>p>em\n",
+                "  border-width: 3px\n",
+                "  ~color: green\n",
+                "  ~text-align: center\n",
+                "E6 html>body>span\n",
+                "  ~color: green\n",
+            )
+        );
+    }
+
+    #[test]
+    fn inheritance_override_and_non_inherited() {
+        // the child sees the nearest computed value (override in the middle)
+        let doc = crate::dom::build("<div><p>x<span>s</span></p></div>");
+        let o = parse("div { color: red } p { color: blue }");
+        let ap = apply(&doc.dom, &o.rules);
+        let span = &ap
+            .elements
+            .iter()
+            .find(|e| e.path.ends_with("span"))
+            .unwrap();
+        assert_eq!(
+            span.inherited
+                .iter()
+                .find(|(k, _)| k == "color")
+                .unwrap()
+                .1,
+            "blue"
+        );
+        // non-inherited properties never propagate
+        let doc = crate::dom::build("<div><p>x</p></div>");
+        let o = parse("div { margin: 1px }");
+        let ap = apply(&doc.dom, &o.rules);
+        assert_eq!(ap.styled, 1);
+        assert_eq!(ap.inherited, 0);
+        assert_eq!(ap.inherited_elements, 0);
+        assert_eq!(ap.elements.len(), 1);
+    }
+
+    #[test]
+    fn inheritance_deep_chain_no_overflow() {
+        let n = 500;
+        let mut s = String::from("<html><body>");
+        for _ in 0..n {
+            s.push_str("<div>");
+        }
+        for _ in 0..n {
+            s.push_str("</div>");
+        }
+        s.push_str("</body></html>");
+        let doc = crate::dom::build(&s);
+        let o = parse("html { color: teal }");
+        let ap = apply(&doc.dom, &o.rules);
+        // head + body + 500 divs carry the inherited color
+        assert_eq!(ap.styled, 1);
+        assert_eq!(ap.inherited, n + 2);
+        assert_eq!(ap.inherited_elements, n + 2);
     }
 
     #[test]

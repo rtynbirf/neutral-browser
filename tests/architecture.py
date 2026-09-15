@@ -89,6 +89,31 @@ assert "tokio" not in css_txt and "reqwest" not in css_txt, "css.rs must stay de
 for flag in ["--style", "--css-file", "--style-output", "STYLE_ELEMENTS_STYLED", "STYLE_RULES"]:
     assert flag in main_txt, f"main.rs missing stage-4 token: {flag}"
 
+# ---- Stage 5 structural invariants ----
+url_txt = (root / "src/url.rs").read_text()
+
+for token in ["fn collect_sheets", "enum SheetRef", "fn is_inherited", "struct SheetList"]:
+    assert token in css_txt, f"css.rs missing stage-5 token: {token}"
+assert "pub fn resolve" in url_txt, "url.rs must expose the href resolver"
+assert "fn remove_dot_segments" in url_txt, "dot-segment removal is part of the subset"
+
+# css.rs stays pure in stage 5: link sheets are only DESCRIBED there; the
+# fetching happens in main.rs through the same gated network::fetch.
+assert "network::fetch" in main_txt, "main.rs must fetch link sheets itself"
+assert "TcpStream" not in css_txt, "css.rs must not touch the network"
+
+# Machine surface of stage 5.
+for token in [
+    "MAX_LINK_SHEETS",
+    "STYLE_LINK_SHEETS",
+    "STYLE_LINK_SHEETS_FETCHED",
+    "STYLE_LINK_SHEETS_FAILED",
+    "LINK_SHEET_FAIL",
+    "STYLE_INHERITED",
+    "STYLE_INHERITED_ELEMENTS",
+]:
+    assert token in main_txt, f"main.rs missing stage-5 token: {token}"
+
 # Zero external runtime dependencies; lockfile present.
 toml = (root / "Cargo.toml").read_text()
 assert "[dependencies]" in toml
@@ -102,9 +127,14 @@ assert "NOT_IMPLEMENTED" in readme, "honest status table required in README"
 assert "foster" in readme.lower(), "README must document the no-foster-parenting subset"
 # Stage 4 must honestly document the at-rules subset.
 assert "at-rules" in readme.lower(), "README must document the at-rules-are-skipped subset"
+# Stage 5 must document the inheritance subset and the STYLE v2 dump.
+assert "наследование" in readme.lower(), "README must document the inheritance subset"
+assert "STYLE v2" in readme, "README must document the STYLE v2 dump format"
+assert "initial" in readme.lower(), "README must document the no-initial-values subset"
 
 print("ARCHITECTURE_TEST=PASS")
 print("POLICY_BROKER_MODEL=PASS")
 print("STAGE2_STRUCTURE=PASS")
 print("STAGE3_STRUCTURE=PASS")
 print("STAGE4_STRUCTURE=PASS")
+print("STAGE5_STRUCTURE=PASS")
