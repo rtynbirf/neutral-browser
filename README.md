@@ -5,9 +5,9 @@
 (`docs/MASTER_PROMPT.md`). Правило проекта: **каждый статус подтверждается машинным
 выводом, а не обещанием**.
 
-Текущая версия: **0.7.0 / STAGE6_LAYOUT**
+Текущая версия: **0.8.0 / STAGE7_PAINT**
 
-Цепочка этапа 6: `URL → Broker → TCP → HTTP/1.1 → тело → HTML → DOM → CSS → STYLE (вычисленные значения) → LAYOUT (блочная раскладка) → машинный отчёт`
+Цепочка этапа 7: `URL → Broker → TCP → HTTP/1.1 → тело → HTML → DOM → CSS → STYLE (вычисленные значения) → LAYOUT (блочная раскладка) → DISPLAY LIST → PAINT (программный растеризатор, бинарный PPM) → машинный отчёт`
 
 ## Что уже РАБОТАЕТ (VERIFIED — машинное доказательство)
 
@@ -41,7 +41,12 @@
 | Канонический LAYOUT-дамп (замороженный формат `LAYOUT v1`: `B<инд> <путь>` + `rect x y w h` / `margin` / `padding` / `border` / `content w h`, порядок документа, display:none-поддеревья отсутствуют) | VERIFIED | `E2E_T20_DUMP_EXACT`, `E2E_T21_SAME_DUMP` (chunked), `E2E_T22_DUMP_EXACT` — побайтовое равенство |
 | Счётчики раскладки: `LAYOUT_BOXES`, `LAYOUT_HIDDEN` (элементы, чей собственный `display:none` убрал бокс), `LAYOUT_ERRORS` (неподдержанные значения известных свойств — учитываются и откатываются к умолчанию, работа не прерывается) | VERIFIED | `E2E_T20`, `E2E_T22_ERRORS` (width:red, display:flex → 2 ошибки, раскладка завершена) |
 | Глубина 10 000 вложенных div в раскладке без переполнения стека | VERIFIED | юнит-тест `deep_nesting_10000_no_overflow` (все проходы раскладки итеративные) |
-| Чистота модулей движка: `html.rs`/`dom.rs`/`css.rs`/`layout.rs` без сетевого и файлового I/O | VERIFIED | `STAGE3/4/6_STRUCTURE=PASS` (`tests/architecture.py`) |
+| Чистота модулей движка: `html.rs`/`dom.rs`/`css.rs`/`layout.rs`/`paint.rs` без сетевого и файлового I/O | VERIFIED | `STAGE3/4/6/7_STRUCTURE=PASS` (`tests/architecture.py`) |
+| Разбор цветов (подмножество CSS Color 3): `#rgb`/`#rrggbb`, `rgb()`/`rgba()` числами 0–255 и процентами (3 или 4 компонента), 16 базовых именованных CSS 2.1, `transparent`; альфа компонуется `over` на пиксель (детерминированная целочисленная математика, округление вверх на 0.5) | VERIFIED | `PAINT_COLORS=PASS` (самотест) + юнит-тесты `paint.rs` (clamp 300→255, 50%→128, 0.5→128, мусор → None) |
+| Канва и пропагация фона (CSS 2.1 §14.2-подмножество): фиксированная канва VIEWPORT_W×VIEWPORT_H; валидный `background-color` у `html` красит всю канву (у html собственной заливки нет), иначе — у `body`; иначе белая канва; мусорное значение считается ошибкой ровно один раз | VERIFIED | `PAINT_FLOW=PASS` + юнит-тесты пропагации (html/body/ни одного/невалидный/display:none) |
+| DISPLAY LIST + PAINT: заливка фона по border-box бокса, затем solid-бордеры — 4 неперекрывающиеся полосы longhand `border-*-width/style/color` (прочие стили = ошибка, откат к none); цвет бордера: `border-X-color` → `color` → чёрный; порядок документа, поздние команды поверх ранних; клиппинг в растре (дамп показывает идеальную геометрию); alpha 0 не порождает команды | VERIFIED | `PAINT_FLOW=PASS` + юнит-тесты (бордеры, перекрытие, клиппинг, откат dashed) + `E2E_T23` (пиксельные пробы всех 4 полос и бленда) |
+| Канонический PAINT-дамп (замороженный формат `PAINT v1`: `CANVAS <hex>` + `F x y w h <hex>` в порядке рисования; цвет `#rrggbb` при a=255, иначе `#rrggbbaa`) и бинарный вывод PPM P6 (детерминированный, без сжатия) | VERIFIED | `E2E_T23_DUMP_EXACT`, `E2E_T23_PPM_SHA` (замороженный sha256), `E2E_T24_SAME_PPM` (chunked → те же байты) |
+| Глубина 10 000 вложенных div в построении display list и растре без переполнения стека | VERIFIED | юнит-тест `deep_nesting_10000_paint_no_overflow` (все проходы итеративные) |
 
 ## Что НЕ реализовано (честно, анти-фасад из МАСТЕР-ПРОМПТА §23)
 
@@ -58,7 +63,11 @@
 | Атрибуты `media`/`disabled` у `<link>` и `<style>` | NOT_IMPLEMENTED — все собранные листы применяются безусловно |
 | Следование @import внутри скачанных листов | NOT_IMPLEMENTED — at-правила поглощаются, глубина скачивания = 1 (только ссылки из HTML) |
 | Продвинутые селекторы: псевдоклассы/псевдоэлементы, `+`/`~`, атрибутные операторы `~= ^= $= *= \|=`, пространства имён | NOT_IMPLEMENTED — такой селектор = ошибка разбора, правило отбрасывается (счётчик `STYLE_ERRORS`) |
-| Строчная раскладка (line boxes) и текст | NOT_IMPLEMENTED — текстовые узлы не генерируют боксов и не дают высоты (шрифтов в движке нет); блок с чисто текстовым содержимым имеет высоту 0 |
+| Строчная раскладка (line boxes) и текст | NOT_IMPLEMENTED — текстовые узлы не генерируют боксов и не дают высоты (шрифтов в движке нет); блок с чисто текстовым содержимым имеет высоту 0; текст НЕ рисуется в PAINT |
+| Рисование текста, изображений, градиентов, box-shadow, outline, border-radius, background-image/repeat/position, opacity, трансформации | NOT_IMPLEMENTED — paint рисует только сплошные заливки и solid-бордеры |
+| Стили бордера кроме `solid` (dashed/dotted/double/…) | NOT_IMPLEMENTED — такая декларация считается ошибкой `PAINT_ERRORS` и откатывается к `none` |
+| `currentcolor` как явное значение, hex-альфа `#rgba`/`#rrggbbaa`, пробельный синтаксис `rgb(1 2 3)` | NOT_IMPLEMENTED — такие значения = ошибка; цвет бордера без `border-X-color` берётся из `color`, иначе чёрный (аппроксимация initial currentcolor — задокументированное отклонение) |
+| PNG/JPEG вывод изображения | NOT_IMPLEMENTED — вывод бинарный PPM P6 (без сжатия, байт-в-байт детерминированный); PNG — этап 8+ |
 | Inline-элементы как inline | NOT_IMPLEMENTED — раскладываются как блоки (отклонение задокументировано в `layout.rs`); block-in-inline сплиттинга нет |
 | Таблица стилей агента пользователя (UA stylesheet) | NOT_IMPLEMENTED — замороженные подмножества: списки inline-by-default и never-rendered элементов в `layout.rs`; умолчания margin/padding = 0 |
 | Float / position / flex / grid / table-layout / min-max размеры / трансформации | NOT_IMPLEMENTED — раскладывается только статический блок-поток |
@@ -72,7 +81,7 @@
 | Специальные режимы `<template>` | NOT_IMPLEMENTED |
 | Полная таблица именованных символьных ссылок (2231 запись) и legacy-набор без `;` | NOT_IMPLEMENTED — реализовано 80 общих имён с обязательным `;` |
 | public/system-идентификаторы DOCTYPE, вычисление quirks mode | NOT_IMPLEMENTED — захватывается только имя |
-| Layout / рендеринг / JS | NOT_IMPLEMENTED частично: блочная раскладка есть (этап 6), строчная раскладка, рендеринг (paint) и JS — этапы 7+ по МАСТЕР-ПРОМПТУ |
+| Layout / рендеринг / JS | NOT_IMPLEMENTED частично: блочная раскладка (этап 6) и программный paint сплошными заливками (этап 7) есть; строчная раскладка, композитинг, GPU-путь и JS — этапы 8+ по МАСТЕР-ПРОМПТУ |
 | Песочница ОС (seccomp/pledge/AppContainer) | NOT_IMPLEMENTED — этап 1 остаётся прототипом policy/broker в одном процессе |
 | obs-fold в заголовках, gzip/br-сжатие | NOT_IMPLEMENTED — такие ответы отклоняются как BAD_HEADER |
 
@@ -110,10 +119,12 @@ URL_RESOLVE=PASS
 CSS_INHERIT=PASS
 LAYOUT_RESOLVE=PASS
 LAYOUT_FLOW=PASS
+PAINT_COLORS=PASS
+PAINT_FLOW=PASS
 ```
 
 Структурные тесты и сквозной прогон (поднимает локальный тест-сервер и гоняет
-реальный бинарник через 22 случая):
+реальный бинарник через 25 случаев):
 
 ```text
 python3 tests/architecture.py
@@ -203,6 +214,34 @@ URL), `STYLE_RULES`, `STYLE_DECLS` (выжившие декларации),
     каскадный победитель перекрывает; initial values отсутствуют;
     `rel="alternate stylesheet"` не применяется автоматически; порядок
     источников каскада — порядок документа по всем листам вместе.
+
+## Изменения относительно stage6 (0.7.0)
+
+- `src/paint.rs` (новый, ~780 строк, чистый модуль — ноль I/O, ноль паник,
+  итеративно): разбор цветов (`#rgb`/`#rrggbb`, `rgb()`/`rgba()` числами и
+  процентами, 16 именованных CSS 2.1, `transparent`, целочисленный
+  over-блендинг альфы); построение DISPLAY LIST из LAYOUT+STYLE (фоны
+  border-box боксов, solid-бордеры четырьмя неперекрывающимися полосами,
+  пропагация фона html→канва→body по §14.2-подмножеству, честные
+  `PAINT_ERRORS`); программный PAINT в фиксированную канву 800×600 RGBA с
+  клиппингом; сериализация в бинарный PPM P6 и канонический дамп
+  `PAINT v1`; +9 юнит-тестов (94 всего).
+- `src/main.rs`: `VERSION 0.8.0`, `STATUS=STAGE7_PAINT`, цепочка продлена до
+  `...->LAYOUT->DISPLAY->PAINT`; `--paint` (подразумевает `--layout` →
+  `--style`), `--paint-output` (бинарный PPM), `--paint-dump` (PAINT v1);
+  счётчики `PAINT_CANVAS/PAINT_BOXES/PAINT_CMDS/PAINT_ERRORS`; самотест
+  `PAINT_COLORS`/`PAINT_FLOW`; NOT_IMPLEMENTED обновлён (paint-text,
+  paint-images, paint-border-styles, paint-png, paint-currentcolor,
+  paint-compositing).
+- `tools/serve_test_page.py`: `/painted` и `/painted-chunked` (фоны, альфа,
+  четыре solid-бордера с разными цветами).
+- `tools/e2e.py`: T23 (fetch→…→PAINT, замороженные sha256 PPM и дамп,
+  9 пиксельных проб: канва/красный/бленд 50%/четыре полосы бордера/фон),
+  T24 (chunked → те же байты), T25 (мусорный цвет + dashed → 2 ошибки,
+  работа завершается), T25b (невписываемый PPM → exit 5, ERROR_KIND=IO).
+- `tests/architecture.py`: фаза `STAGE7_STRUCTURE` (paint.rs в whitelist
+  модулей/чистоты/слоинга, токены, CLI, счётчики; README: PAINT v1, PPM,
+  рендеринг, STAGE7_PAINT).
 
 ## Изменения относительно stage4 (0.5.0)
 

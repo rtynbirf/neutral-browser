@@ -1,7 +1,7 @@
-//! neutral-browser — user-owned browser, stage 6: block layout (LAYOUT).
+//! neutral-browser — user-owned browser, stage 7: display list + paint.
 //!
 //! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> CSS
-//!        -> STYLE -> LAYOUT.
+//!        -> STYLE -> LAYOUT -> DISPLAY LIST -> PAINT.
 //! Nothing is done implicitly: the network is touched only by --fetch;
 //! parsing happens on the fetched body (--dom/--style) or on the user's own
 //! files (--dom-file/--css-file, the user is the principal — not a web
@@ -9,8 +9,10 @@
 //! the same broker-gated chain (base URL from --fetch only), and inherited
 //! properties propagate computed values down the DOM (STYLE v2 dump).
 //! Stage 6: block layout per CSS 2.1 ch.10 subset — box tree with used
-//! widths/heights/positions (LAYOUT v1 dump). --layout implies --style:
-//! the cascade always runs first, then the layout pass.
+//! widths/heights/positions (LAYOUT v1 dump). --layout implies --style.
+//! Stage 7: display list + software paint over a fixed VIEWPORT_W x
+//! VIEWPORT_H canvas (PAINT v1 dump, binary PPM P6 output). --paint
+//! implies --layout implies --style.
 
 mod broker;
 mod css;
@@ -19,6 +21,7 @@ mod html;
 mod http;
 mod layout;
 mod network;
+mod paint;
 mod policy;
 mod sha256;
 mod url;
@@ -28,7 +31,7 @@ use std::process::exit;
 use broker::Broker;
 use policy::{Capability, Decision, Policy};
 
-const VERSION: &str = "0.7.0";
+const VERSION: &str = "0.8.0";
 
 /// Cap on distinct <link rel=stylesheet> sheets fetched per page: link
 /// fetches are engine-triggered network I/O and must stay bounded.
@@ -66,13 +69,13 @@ fn run() -> i32 {
         return fetch_command(&args, &raw);
     }
     println!("neutral-browser {}", VERSION);
-    println!("STATUS=STAGE6_LAYOUT");
-    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE->LAYOUT");
+    println!("STATUS=STAGE7_PAINT");
+    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE->LAYOUT->DISPLAY->PAINT");
     println!(
-        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,layout-line-boxes,layout-inline-splitting,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,rendering,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
+        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,layout-line-boxes,layout-inline-splitting,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,paint-text,paint-images,paint-border-styles,paint-png,paint-currentcolor,paint-compositing,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
     );
     println!(
-        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--layout] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--layout] [--css-file <path>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] | --self-test"
+        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--layout] [--paint] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--layout] [--paint] [--css-file <path>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] | --self-test"
     );
     0
 }
@@ -102,7 +105,7 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
     if rc != 0 {
         return rc;
     }
-    if has_flag(args, "--style") || has_flag(args, "--layout") {
+    if has_flag(args, "--style") || has_flag(args, "--layout") || has_flag(args, "--paint") {
         let (rc, ap) = style_stage(
             &r.dom,
             flag(args, "--css-file").as_deref(),
@@ -114,8 +117,26 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
         if rc != 0 {
             return rc;
         }
-        if let (Some(ap), true) = (ap, has_flag(args, "--layout")) {
-            return layout_stage(&r.dom, &ap, flag(args, "--layout-output").as_deref());
+        if let (Some(ap), true) = (
+            ap,
+            has_flag(args, "--layout") || has_flag(args, "--paint"),
+        ) {
+            let (lrc, lo) = layout_stage(&r.dom, &ap, flag(args, "--layout-output").as_deref());
+            if lrc != 0 {
+                return lrc;
+            }
+            let Some(lo) = lo else { return 0 }; // lrc == 0 always yields Some
+            if has_flag(args, "--paint") {
+                let prc = paint_stage(
+                    &lo,
+                    &ap,
+                    flag(args, "--paint-output").as_deref(),
+                    flag(args, "--paint-dump").as_deref(),
+                );
+                if prc != 0 {
+                    return prc;
+                }
+            }
         }
     }
     0
@@ -314,7 +335,12 @@ fn style_stage(
 /// Stage 6: block layout over the DOM with the computed STYLE. The layout
 /// pass itself is pure (layout::run); this wrapper only reports counters,
 /// writes the optional LAYOUT v1 dump and maps I/O failures to exit 5.
-fn layout_stage(tree: &dom::Dom, ap: &css::StyleApply, out_path: Option<&str>) -> i32 {
+/// Returns the LayoutOut for the stage-7 paint pass.
+fn layout_stage(
+    tree: &dom::Dom,
+    ap: &css::StyleApply,
+    out_path: Option<&str>,
+) -> (i32, Option<layout::LayoutOut>) {
     let lo = layout::run(tree, ap);
     println!("LAYOUT_BOXES={}", lo.boxes.len());
     println!("LAYOUT_HIDDEN={}", lo.hidden);
@@ -326,11 +352,53 @@ fn layout_stage(tree: &dom::Dom, ap: &css::StyleApply, out_path: Option<&str>) -
                 println!("LAYOUT_SAVE_ERROR={}", e);
                 println!("LAYOUT=ERROR");
                 println!("ERROR_KIND=IO");
-                return 5;
+                return (5, None);
             }
         }
     }
     println!("LAYOUT=OK");
+    (0, Some(lo))
+}
+
+/// Stage 7: display list + software paint. The paint pass is pure
+/// (paint::display_list + paint::raster); this wrapper only reports
+/// counters, writes the optional binary PPM (--paint-output) and the
+/// optional PAINT v1 dump (--paint-dump), mapping I/O failures to exit 5.
+fn paint_stage(
+    lo: &layout::LayoutOut,
+    ap: &css::StyleApply,
+    ppm_path: Option<&str>,
+    dump_path: Option<&str>,
+) -> i32 {
+    let dl = paint::display_list(lo, ap);
+    let cv = paint::raster(&dl);
+    println!("PAINT_CANVAS={}", dl.canvas.hex());
+    println!("PAINT_BOXES={}", dl.boxes_painted);
+    println!("PAINT_CMDS={}", dl.cmds.len());
+    println!("PAINT_ERRORS={}", dl.errors);
+    if let Some(p) = dump_path {
+        match std::fs::write(p, paint::dump(&dl)) {
+            Ok(_) => println!("PAINT_DUMP_SAVED={}", p),
+            Err(e) => {
+                println!("PAINT_DUMP_SAVE_ERROR={}", e);
+                println!("PAINT=ERROR");
+                println!("ERROR_KIND=IO");
+                return 5;
+            }
+        }
+    }
+    if let Some(p) = ppm_path {
+        match std::fs::write(p, paint::to_ppm(&cv)) {
+            Ok(_) => println!("PAINT_SAVED={}", p),
+            Err(e) => {
+                println!("PAINT_SAVE_ERROR={}", e);
+                println!("PAINT=ERROR");
+                println!("ERROR_KIND=IO");
+                return 5;
+            }
+        }
+    }
+    println!("PAINT=OK");
     0
 }
 
@@ -388,7 +456,11 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                     Err(e) => println!("BODY_SAVE_ERROR={}", e),
                 }
             }
-            if has_flag(args, "--dom") || has_flag(args, "--style") || has_flag(args, "--layout") {
+            if has_flag(args, "--dom")
+                || has_flag(args, "--style")
+                || has_flag(args, "--layout")
+                || has_flag(args, "--paint")
+            {
                 let html_src = String::from_utf8_lossy(&rep.body).into_owned();
                 let r = dom::build(&html_src);
                 if has_flag(args, "--dom") {
@@ -397,7 +469,10 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                         return rc;
                     }
                 }
-                if has_flag(args, "--style") || has_flag(args, "--layout") {
+                if has_flag(args, "--style")
+                    || has_flag(args, "--layout")
+                    || has_flag(args, "--paint")
+                {
                     let (rc, ap) = style_stage(
                         &r.dom,
                         flag(args, "--css-file").as_deref(),
@@ -409,14 +484,29 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                     if rc != 0 {
                         return rc;
                     }
-                    if let (Some(ap), true) = (ap, has_flag(args, "--layout")) {
-                        let lrc = layout_stage(
+                    if let (Some(ap), true) = (
+                        ap,
+                        has_flag(args, "--layout") || has_flag(args, "--paint"),
+                    ) {
+                        let (lrc, lo) = layout_stage(
                             &r.dom,
                             &ap,
                             flag(args, "--layout-output").as_deref(),
                         );
                         if lrc != 0 {
                             return lrc;
+                        }
+                        let Some(lo) = lo else { return 0 }; // lrc == 0 always yields Some
+                        if has_flag(args, "--paint") {
+                            let prc = paint_stage(
+                                &lo,
+                                &ap,
+                                flag(args, "--paint-output").as_deref(),
+                                flag(args, "--paint-dump").as_deref(),
+                            );
+                            if prc != 0 {
+                                return prc;
+                            }
                         }
                     }
                 }
@@ -833,6 +923,57 @@ fn self_test() -> i32 {
         assert_eq!(b.border_h(), b.bt + b.pt + b.content_h + b.pb + b.bb);
     }
     println!("LAYOUT_FLOW=PASS");
+
+    // ---- Stage 7: color parsing subset ----
+    assert_eq!(
+        paint::parse_color("#fff"),
+        Some(paint::Rgba { r: 255, g: 255, b: 255, a: 255 })
+    );
+    assert_eq!(
+        paint::parse_color("#ff0000"),
+        Some(paint::Rgba { r: 255, g: 0, b: 0, a: 255 })
+    );
+    assert_eq!(paint::parse_color("RED").map(|c| c.r), Some(255));
+    assert_eq!(
+        paint::parse_color("rgb(300,-5,0)").map(|c| (c.r, c.g, c.b)),
+        Some((255, 0, 0))
+    );
+    assert_eq!(
+        paint::parse_color("rgba(255,0,0,0.5)").map(|c| c.a),
+        Some(128)
+    );
+    assert_eq!(
+        paint::parse_color("rgb(50%,100%,0%)").map(|c| (c.r, c.g)),
+        Some((128, 255))
+    );
+    assert_eq!(paint::parse_color("transparent"), Some(paint::Rgba::TRANSPARENT));
+    assert_eq!(paint::parse_color("rgb(1 2 3)"), None); // space syntax unsupported
+    assert_eq!(paint::parse_color("currentcolor"), None); // NOT_IMPLEMENTED
+    println!("PAINT_COLORS=PASS");
+
+    // ---- Stage 7: cascade -> LAYOUT -> DISPLAY LIST -> PAINT ----
+    let doc = dom::build(r#"<div id="a"><div id="b">x</div></div>"#);
+    let o = css::parse(
+        "#a { width: 100px; height: 100px; background-color: red }
+         #b { width: 50px; height: 50px; background-color: blue }",
+    );
+    let ap = css::apply(&doc.dom, &o.rules);
+    let lo = layout::run(&doc.dom, &ap);
+    let dl = paint::display_list(&lo, &ap);
+    assert_eq!(dl.errors, 0);
+    assert_eq!(dl.cmds.len(), 2); // #a fill + #b fill (later paints over)
+    let cv = paint::raster(&dl);
+    let px = |x: i64, y: i64| -> (u8, u8, u8) {
+        let o = ((y * cv.w + x) * 4) as usize;
+        (cv.px[o], cv.px[o + 1], cv.px[o + 2])
+    };
+    assert_eq!(px(10, 10), (0, 0, 255)); // #b paints over #a
+    assert_eq!(px(75, 75), (255, 0, 0)); // #a only
+    assert_eq!(px(400, 400), (255, 255, 255)); // untouched canvas (white)
+    let ppm = paint::to_ppm(&cv);
+    assert_eq!(&ppm[..15], b"P6\n800 600\n255\n");
+    assert_eq!(ppm.len(), 15 + 800 * 600 * 3);
+    println!("PAINT_FLOW=PASS");
 
     0
 }

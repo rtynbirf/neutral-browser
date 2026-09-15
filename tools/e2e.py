@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end machine verification for neutral-browser (stages 2-6).
+"""End-to-end machine verification for neutral-browser (stages 2-7).
 
 Starts a local HTTP test server, drives the REAL compiled binary and asserts
 its machine output line by line. Verdict per case (E2E_Tn_*=PASS/FAIL) and a
@@ -538,6 +538,23 @@ B8 html>body>div>div
   content 200 0
 """
 
+# Frozen PAINT v1 dump and PPM sha256 for /painted (verified against the
+# real binary output; see paint.rs for the format contract):
+# boxes: html propagated canvas, body transparent, #red fill, #blue fill
+# (50% blue over red), #frame white fill + 4 solid border strips
+# (content-box: border box 63x47 = 1+60+2 x 3+40+4).
+        EXPECTED_PAINT_DUMP = """PAINT v1
+CANVAS #e0e0e0
+F 0 0 200 100 #ff0000
+F 0 0 100 50 #0000ff80
+F 0 100 63 47 #ffffff
+F 0 100 63 3 #008000
+F 0 143 63 4 #0000ff
+F 0 103 1 40 #ffff00
+F 61 103 2 40 #00ff00
+"""
+        EXPECTED_PPM_SHA256 = "3a31c50030e6e05c6547cc3e642a3a78386e79acf7707789aeb6b0b7211b6bbf"
+
         # T20: fetch -> DOM -> cascade -> STYLE -> LAYOUT (exact dump):
         # --layout implies --style (the STYLE block always precedes LAYOUT)
         with tempfile.TemporaryDirectory() as td:
@@ -651,6 +668,115 @@ B5 html>body>p
             check("E2E_T22B_LAYOUT_ERROR", o.get("LAYOUT") == "ERROR", raw)
             check("E2E_T22B_KIND", o.get("ERROR_KIND") == "IO", raw)
             check("E2E_T22B_EXIT5", rc == 5, raw)
+
+            # ---- Stage 7: DISPLAY LIST + PAINT ----
+
+            # T23: fetch -> STYLE -> LAYOUT -> DISPLAY LIST -> PAINT; the PPM
+            # artifact and the PAINT v1 dump are frozen byte-for-byte
+            with tempfile.TemporaryDirectory() as td:
+                ppm = Path(td) / "out.ppm"
+                pDump = Path(td) / "paint.txt"
+                rc, o, raw = run_client(
+                    ["--fetch", f"{base}/painted", "--paint",
+                     "--paint-output", str(ppm), "--paint-dump", str(pDump)]
+                )
+                check("E2E_T23_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+                check("E2E_T23_LAYOUT_OK", o.get("LAYOUT") == "OK", raw)
+                check("E2E_T23_CANVAS", o.get("PAINT_CANVAS") == "#e0e0e0", raw)
+                check("E2E_T23_BOXES", o.get("PAINT_BOXES") == "3", raw)
+                check("E2E_T23_CMDS", o.get("PAINT_CMDS") == "7", raw)
+                check("E2E_T23_ERRORS", o.get("PAINT_ERRORS") == "0", raw)
+                check("E2E_T23_PAINT_OK", o.get("PAINT") == "OK", raw)
+                check(
+                    "E2E_T23_DUMP_EXACT",
+                    pDump.exists() and pDump.read_text(encoding="utf-8") == EXPECTED_PAINT_DUMP,
+                    raw,
+                )
+                ppm_ok = ppm.exists() and ppm.stat().st_size == 15 + 800 * 600 * 3
+                check("E2E_T23_PPM_SIZE", ppm_ok, raw)
+                if ppm_ok:
+                    data = ppm.read_bytes()
+                    dig = hashlib.sha256(data).hexdigest()
+                    check("E2E_T23_PPM_SHA", dig == EXPECTED_PPM_SHA256, raw)
+                    check("E2E_T23_PPM_HEADER", data[:15] == b"P6\n800 600\n255\n", raw)
+
+                    def pix(x: int, y: int) -> bytes:
+                        off = 15 + (y * 800 + x) * 3
+                        return data[off:off + 3]
+
+                    check("E2E_T23_CANVAS_PIX", pix(700, 500) == b"\xe0\xe0\xe0", raw)
+                    check("E2E_T23_RED_PIX", pix(150, 50) == b"\xff\x00\x00", raw)
+                    # 50% blue over red -> (127, 0, 128)
+                    check("E2E_T23_BLEND_PIX", pix(50, 25) == bytes([127, 0, 128]), raw)
+                    # frame borders: top green, right #00ff00, bottom blue,
+                    # left yellow (content-box border box 63x47 at 0,100)
+                    check("E2E_T23_BT_PIX", pix(30, 101) == b"\x00\x80\x00", raw)
+                    check("E2E_T23_BR_PIX", pix(62, 110) == b"\x00\xff\x00", raw)
+                    check("E2E_T23_BB_PIX", pix(30, 145) == b"\x00\x00\xff", raw)
+                    check("E2E_T23_BL_PIX", pix(0, 110) == b"\xff\xff\x00", raw)
+                    check("E2E_T23_BG_PIX", pix(30, 110) == b"\xff\xff\xff", raw)
+
+                # T24: chunked framing -> identical bytes -> identical artifacts
+                ppm2 = Path(td) / "out2.ppm"
+                pDump2 = Path(td) / "paint2.txt"
+                rc, o2, raw2 = run_client(
+                    ["--fetch", f"{base}/painted-chunked", "--paint",
+                     "--paint-output", str(ppm2), "--paint-dump", str(pDump2)]
+                )
+                check("E2E_T24_FETCH_OK", o2.get("FETCH") == "OK" and rc == 0, raw2)
+                check("E2E_T24_CMDS", o2.get("PAINT_CMDS") == "7", raw2)
+                check(
+                    "E2E_T24_SAME_DUMP",
+                    pDump2.exists()
+                    and pDump2.read_text(encoding="utf-8") == EXPECTED_PAINT_DUMP,
+                    raw2,
+                )
+                check(
+                    "E2E_T24_SAME_PPM",
+                    ppm2.exists() and hashlib.sha256(ppm2.read_bytes()).hexdigest() == EXPECTED_PPM_SHA256,
+                    raw2,
+                )
+
+            # T25: --dom-file: unsupported paint values are counted honestly
+            # (garbage background-color, dashed border) and fall back; painting
+            # of the rest of the page still completes
+            with tempfile.TemporaryDirectory() as td:
+                src_html = Path(td) / "u.html"
+                src_css = Path(td) / "u.css"
+                src_html.write_text(
+                    '<!doctype html><html><body><div class="bad">x</div>'
+                    '<div id="ok">y</div></body></html>',
+                    encoding="utf-8",
+                )
+                src_css.write_text(
+                    ".bad { background-color: 12px; border-top-style: dashed;"
+                    " border-top-width: 2px; border-top-color: red }\n"
+                    "#ok { width: 10px; height: 10px; background-color: teal }\n",
+                    encoding="utf-8",
+                )
+                ppm3 = Path(td) / "out3.ppm"
+                rc, o3, raw3 = run_client(
+                    ["--dom-file", str(src_html), "--css-file", str(src_css),
+                     "--paint", "--paint-output", str(ppm3)]
+                )
+                check("E2E_T25_PAINT_OK", o3.get("PAINT") == "OK" and rc == 0, raw3)
+                check("E2E_T25_ERRORS", o3.get("PAINT_ERRORS") == "2", raw3)
+                check("E2E_T25_CMDS", o3.get("PAINT_CMDS") == "1", raw3)
+                check("E2E_T25_CANVAS", o3.get("PAINT_CANVAS") == "#ffffff", raw3)
+                if ppm3.exists():
+                    d3 = ppm3.read_bytes()
+                    off = 15 + (5 * 800 + 5) * 3
+                    check("E2E_T25_TEAL_PIX", d3[off:off + 3] == b"\x00\x80\x80", raw3)
+
+                # T25b: unwritable PPM path -> honest IO error, exit 5
+                rc, o4, raw4 = run_client(
+                    ["--dom-file", str(src_html), "--css-file", str(src_css),
+                     "--paint", "--paint-output",
+                     str(Path(td) / "no" / "such" / "dir" / "x.ppm")]
+                )
+                check("E2E_T25B_PAINT_ERROR", o4.get("PAINT") == "ERROR", raw4)
+                check("E2E_T25B_KIND", o4.get("ERROR_KIND") == "IO", raw4)
+                check("E2E_T25B_EXIT5", rc == 5, raw4)
 
     finally:
         server.terminate()

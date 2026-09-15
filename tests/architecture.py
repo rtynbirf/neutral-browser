@@ -173,7 +173,7 @@ REQUIRED = [
 
 SRC_WHITELIST = {
     "main.rs", "policy.rs", "broker.rs", "url.rs", "http.rs", "network.rs",
-    "sha256.rs", "html.rs", "dom.rs", "css.rs", "layout.rs",
+    "sha256.rs", "html.rs", "dom.rs", "css.rs", "layout.rs", "paint.rs",
 }
 
 
@@ -189,7 +189,7 @@ def check_files():
 
 
 # ---------------------------------------------------------------- P1: purity
-PURE_MODULES = ["policy", "broker", "url", "sha256", "html", "dom", "css", "http", "layout"]
+PURE_MODULES = ["policy", "broker", "url", "sha256", "html", "dom", "css", "http", "layout", "paint"]
 
 FORBIDDEN_PURE = [
     "TcpStream", "UdpSocket", "std::net", "ToSocketAddrs", "lookup_host",
@@ -221,9 +221,10 @@ ALLOWED_IMPORTS = {
     "layout": {"css", "dom"},
     "http": set(),
     "network": {"broker", "http", "policy", "url"},
+    "paint": {"css", "layout", "dom", "sha256"},
 }
 
-_CRATE_REF = re.compile(r"\bcrate::([a-z_]+)")
+_CRATE_REF = re.compile(r"\bcrate::([a-z_][a-z_0-9]*)")
 
 
 def check_layering():
@@ -252,7 +253,7 @@ def check_layering():
 def stage_checks():
     stripped = {m: strip_rust_comments(read(f"src/{m}.rs"))
                 for m in ("policy", "broker", "url", "http", "network", "sha256",
-                          "html", "dom", "css", "layout", "main")}
+                          "html", "dom", "css", "layout", "paint", "main")}
     main_txt = read("src/main.rs")  # CLI flags live inside string literals too
 
     def need(phase, mod, patterns):
@@ -337,11 +338,25 @@ def stage_checks():
     if not re.search(r"\bfn\s+layout_stage\b", main_txt):
         fail("STAGE6_STRUCTURE", "layout wrapper must live in main.rs")
 
+    # Stage 7: display list + software paint (PAINT v1 dump, binary PPM P6)
+    need("STAGE7_STRUCTURE", "paint", [
+        r"\bpub\s+fn\s+display_list\b", r"\benum\s+Cmd\b",
+        r"\bstruct\s+DisplayList\b", r"\bstruct\s+Canvas\b",
+        r"\bpub\s+fn\s+raster\b", r"\bpub\s+fn\s+parse_color\b",
+        r"\bpub\s+fn\s+to_ppm\b", r"\bpub\s+fn\s+dump\b",
+        r"\bstruct\s+Rgba\b", r"\bfn\s+over\b",
+    ])
+    need_main("STAGE7_STRUCTURE", ["--paint", "--paint-output", "--paint-dump",
+                                   "PAINT_CANVAS", "PAINT_BOXES", "PAINT_CMDS",
+                                   "PAINT_ERRORS"])
+    if not re.search(r"\bfn\s+paint_stage\b", main_txt):
+        fail("STAGE7_STRUCTURE", "paint wrapper must live in main.rs")
+
 
 # ---------------------------------------------------------------- P4: panic discipline
 _PANIC = re.compile(r"\.unwrap\(\)|\.expect\(|\bpanic!|\btodo!|\bunimplemented!")
 ZERO_PANIC_MODULES = ["policy", "broker", "network", "dom", "html", "http",
-                      "sha256", "url", "layout"]
+                      "sha256", "url", "layout", "paint"]
 CSS_PANIC_CEILING = 3  # documented tokenizer invariant-unwraps (validated hex / bounds)
 
 
@@ -429,7 +444,8 @@ def check_cargo():
 # ---------------------------------------------------------------- P7: README honesty
 README_PHRASES = [
     "NOT_IMPLEMENTED", "VERIFIED", "foster", "at-rules", "наследование",
-    "initial", "STYLE v2", "LAYOUT v1", "STAGE6_LAYOUT", "HTTPS",
+    "initial", "STYLE v2", "LAYOUT v1", "PAINT v1", "PPM", "рендеринг",
+    "STAGE7_PAINT", "HTTPS",
 ]
 
 
@@ -476,8 +492,8 @@ def check_compile():
 # ---------------------------------------------------------------- runner
 _MARKERS = ["FILES", "PURE_MODULES", "LAYERING", "STAGE1_STRUCTURE", "STAGE2_STRUCTURE",
             "STAGE3_STRUCTURE", "STAGE4_STRUCTURE", "STAGE5_STRUCTURE",
-            "STAGE6_STRUCTURE", "PANIC_DISCIPLINE", "LIMITS", "CARGO_ZERO_DEP",
-            "README_HONESTY", "TOOLS_SYNTAX", "COMPILE"]
+            "STAGE6_STRUCTURE", "STAGE7_STRUCTURE", "PANIC_DISCIPLINE", "LIMITS",
+            "CARGO_ZERO_DEP", "README_HONESTY", "TOOLS_SYNTAX", "COMPILE"]
 
 check_files()
 check_pure()

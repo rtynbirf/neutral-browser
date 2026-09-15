@@ -21,6 +21,8 @@ Endpoints:
   /root.css, /abs.css -> 200, stylesheets for /sub/rel.html
   /layout           -> 200, page exercising block layout (stage 6)
   /layout-chunked   -> 200, chunked framing of the layout page
+  /painted          -> 200, page exercising display list + paint (stage 7)
+  /painted-chunked  -> 200, chunked framing of the painted page
   anything else     -> 404, short plain-text body
 
 No third-party modules. No telemetry. Binds 127.0.0.1 only.
@@ -116,6 +118,24 @@ LAYOUT = (
     b'</body></html>'
 )
 
+PAINTED = (
+    b'<!doctype html><html><head><title>p</title><style>'
+    b'html { background-color: #e0e0e0 }'
+    b'#red { width: 200px; height: 100px; background-color: red }'
+    b'#blue { width: 100px; height: 50px; background-color: rgba(0,0,255,0.5) }'
+    b'#frame { width: 60px; height: 40px; background-color: white;'
+    b' border-top-width: 3px; border-right-width: 2px;'
+    b' border-bottom-width: 4px; border-left-width: 1px;'
+    b' border-top-style: solid; border-right-style: solid;'
+    b' border-bottom-style: solid; border-left-style: solid;'
+    b' border-top-color: green; border-right-color: #0f0;'
+    b' border-bottom-color: rgb(0,0,255); border-left-color: yellow }'
+    b'</style></head><body>'
+    b'<div id="red">r<div id="blue">b</div></div>'
+    b'<div id="frame">f</div>'
+    b'</body></html>'
+)
+
 SHEET_CSS = b"p { color: red }\n.c { color: green; padding: 1px }\n"
 LATE_CSS = b".z { color: blue }\n"
 ROOT_CSS = b"p { color: teal }\n"
@@ -169,6 +189,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send_fixed(200, LAYOUT, "text/html; charset=utf-8")
         elif self.path == "/layout-chunked":
             self._send_chunked(LAYOUT, "text/html; charset=utf-8")
+        elif self.path == "/painted":
+            self._send_fixed(200, PAINTED, "text/html; charset=utf-8")
+        elif self.path == "/painted-chunked":
+            self._send_chunked(PAINTED, "text/html; charset=utf-8")
         elif self.path == "/sub/sheet.css":
             self._send_fixed(200, SUB_SHEET_CSS, "text/css")
         elif self.path == "/root.css":
