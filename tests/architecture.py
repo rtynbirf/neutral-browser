@@ -1,0 +1,67 @@
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+required = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/main.rs",
+    "src/policy.rs",
+    "src/broker.rs",
+    "src/url.rs",
+    "src/http.rs",
+    "src/network.rs",
+    "src/sha256.rs",
+    "tools/serve_test_page.py",
+    "tools/e2e.py",
+    "docs/ARCHITECTURE.md",
+    "docs/DEPENDENCY_POLICY.md",
+]
+missing = [p for p in required if not (root / p).exists()]
+assert not missing, f"missing={missing}"
+
+# All Rust sources concatenated (stage1 checked main.rs only; the tree grew).
+src = ""
+for p in sorted((root / "src").glob("*.rs")):
+    src += p.read_text() + "\n"
+
+# ---- Stage 1 invariants must survive the module split ----
+for token in [
+    "struct Capability",
+    "struct Policy",
+    "struct Broker",
+    "fn evaluate",
+    "fn request",
+    "Decision::Deny",
+    "Decision::Allow",
+]:
+    assert token in src, f"missing token: {token}"
+assert "cap.decision" not in src, "decision must not be supplied by the requester"
+
+# ---- Stage 2 structural invariants ----
+net = (root / "src/network.rs").read_text()
+others = ""
+for p in sorted((root / "src").glob("*.rs")):
+    if p.name != "network.rs":
+        others += p.read_text()
+assert "TcpStream::connect" in net, "network.rs must perform the connect"
+assert "TcpStream::connect" not in others, "connect allowed only in network.rs"
+assert "broker.request(" in net, "fetch must pass through the broker"
+
+assert "decode_chunked" in (root / "src/http.rs").read_text()
+assert "sha256" in (root / "src/sha256.rs").read_text()
+main_txt = (root / "src/main.rs").read_text()
+assert "--fetch" in main_txt and "--self-test" in main_txt
+
+# Zero external runtime dependencies; lockfile present.
+toml = (root / "Cargo.toml").read_text()
+assert "[dependencies]" in toml
+after = toml.split("[dependencies]", 1)[1].strip()
+assert after == "", f"dependencies list must stay empty, found: {after!r}"
+
+# Anti-facade statuses documented.
+readme = (root / "README.md").read_text()
+assert "NOT_IMPLEMENTED" in readme, "honest status table required in README"
+
+print("ARCHITECTURE_TEST=PASS")
+print("POLICY_BROKER_MODEL=PASS")
+print("STAGE2_STRUCTURE=PASS")
