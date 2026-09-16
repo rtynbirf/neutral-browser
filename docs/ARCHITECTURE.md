@@ -238,3 +238,114 @@ fetched sheet is NOT followed (fetch depth = 1); `inherit`/`initial`/
 absence, not an invented defaults table); a colon inside a relative href
 stays in the path (no scheme sniffing); the `User-Agent` now reports the
 current version. All of the above is listed in the README status table.
+
+## Stage 6: block layout -> LAYOUT (v0.7.0)
+
+Stage 6 adds the LAYOUT link: a box tree with used widths, heights and
+positions over the computed STYLE, per a CSS 2.1 ch.10 subset:
+
+```
+DOM (element tree)                STYLE (computed declarations)
+        |                                   |
+        +----------------+------------------+
+                         v
+        BOX TREE CONSTRUCTION (layout.rs, pure, iterative)
+             display:none removes the element's own box + subtree (LAYOUT_HIDDEN)
+             never-rendered / inline-by-default frozen subsets (no UA stylesheet:
+             defaults are honest zeros, documented deviations)
+                         v
+        WIDTH RESOLUTION  (CSS 2.1 10.3.3 subset)   parse_len: px / % / auto
+             content width from the parent's content box;
+             auto margins center; over-constrained resolves in LTR
+             (margin-right absorbs); width:auto zeroes auto margins;
+             box-sizing: border-box honored
+                         v
+        HEIGHT RESOLUTION  (CSS 2.1 10.6.3 / 10.5 subset)
+             px / % (only against a definite container height) / auto =
+             sum of children's margin boxes (iterative stack)
+                         v
+        LAYOUT RESULT
+             +--> counters: LAYOUT_BOXES / LAYOUT_HIDDEN / LAYOUT_ERRORS
+             |    (unsupported values of known properties are counted and
+             |     fall back to defaults; work never aborts)
+             +--> canonical dump "LAYOUT v1" (frozen): per box in document
+                  order - `B<idx> <path>`, rect / margin / padding / border /
+                  content w h
+             +--> LayoutOut (input of stage 7)
+```
+
+Purity and robustness invariants: `layout.rs` is a pure module (no I/O, no
+panics; every walk is iterative - 10 000 nested divs are a unit test); the
+box equations `w = bl+pl+content_w+pr+br` and `border_h = bt+pt+content_h+
+pb+bb` hold for every box (unit-tested); percentages resolve against the
+container WIDTH, including vertical paddings/borders (documented subset).
+
+## Stage 7: display list + software paint -> PAINT (v0.8.0)
+
+Stage 7 turns the box tree into pixels: a display list, then a raster:
+
+```
+LayoutOut + StyleApply
+        |
+        v
+DISPLAY LIST (paint.rs, pure)          paint::display_list
+     canvas color = CSS 2.1 14.2 subset propagation:
+     valid background-color on html paints the whole canvas (html itself has
+     no fill), else body's, else white; garbage = one counted error
+     per box, document order: Fill{border-box, background-color}
+     then 4 non-overlapping strips for solid longhand borders
+     (other border styles = counted error, fall back to none);
+     border color: border-X-color -> color -> black; alpha 0 = no command
+        |
+        v
+RASTER (paint.rs, pure)                paint::raster
+     fixed VIEWPORT_W x VIEWPORT_H RGBA canvas; later commands paint over
+     earlier ones; rectangles clipped in i64 (dumps show ideal geometry);
+     per-pixel integer over-blending with ceil(0.5) rounding
+        |
+        v
+OUTPUTS
+     +--> counters: PAINT_CANVAS / PAINT_BOXES / PAINT_CMDS / PAINT_ERRORS
+     +--> canonical dump "PAINT v1" (frozen): `CANVAS <hex>` then
+          `F x y w h <hex>` in paint order (#rrggbb at a=255, #rrggbbaa else)
+     +--> binary PPM P6 (deterministic, uncompressed)
+```
+
+## Stage 8: PNG output (v0.9.0)
+
+Stage 8 closes the output link with a real image format, still with zero
+dependencies — the container and its checksums are written from scratch:
+
+```
+Canvas (RGBA, stage 7 raster)
+        |
+        v
+SCANLINE FRAMING (png.rs, pure)        filter byte 0 (None) per row
+        |
+        v
+ZLIB STREAM (png.rs)                   zlib_store: CMF=0x78 FLG=0x01,
+     STORED deflate blocks only (RFC 1951 3.2.4): every 65535-byte slice
+     becomes a byte-aligned block BFINAL?+BTYPE=00+LEN+NLEN(!LEN)+payload;
+     big-endian Adler-32 (RFC 1950 8.2) trailer
+        |
+        v
+PNG CONTAINER (png.rs)                 signature 89 50 4E 47 0D 0A 1A 0A
+     IHDR (w,h, bit depth 8, color type 6 RGBA, compression 0, filter 0,
+     interlace 0) + IDAT (the zlib stream) + IEND; every chunk:
+     big-endian length + type + data + CRC-32 over type|data
+     (ISO 3309 table-driven, reflected, poly 0xEDB88320)
+        |
+        v
+encode(w, h, rgba) -> Option<Vec<u8>>  honest rejection: non-positive or
+     overflowing geometry or a wrong buffer length never panics
+```
+
+Anti-circular verification: CRC-32 and Adler-32 are pinned by published
+vectors (`"123456789"` -> 0xCBF43926, `"abc"` -> 0x024D0127, ...); the frozen
+PNG of the e2e page was decoded by an INDEPENDENT inflater (Python stdlib
+zlib) whose scanlines match the PPM ground truth of stage 7 — the writer is
+checked against the OS inflater, not only against itself; a test-side
+stored-block inflater additionally round-trips multi-block streams. The
+output remains byte-for-byte deterministic. `png.rs` is a pure module (no
+I/O, no panics, empty import graph); the file write happens in main.rs under
+the same I/O error discipline as PPM (exit 5).

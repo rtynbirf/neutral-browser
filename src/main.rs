@@ -13,6 +13,8 @@
 //! Stage 7: display list + software paint over a fixed VIEWPORT_W x
 //! VIEWPORT_H canvas (PAINT v1 dump, binary PPM P6 output). --paint
 //! implies --layout implies --style.
+//! Stage 8: PNG output (--png-output) — own CRC-32/Adler-32, zlib stream of
+//! stored deflate blocks, PNG 8-bit RGBA filter-0; byte-for-byte deterministic.
 
 mod broker;
 mod css;
@@ -22,6 +24,7 @@ mod http;
 mod layout;
 mod network;
 mod paint;
+mod png;
 mod policy;
 mod sha256;
 mod url;
@@ -31,7 +34,7 @@ use std::process::exit;
 use broker::Broker;
 use policy::{Capability, Decision, Policy};
 
-const VERSION: &str = "0.8.0";
+const VERSION: &str = "0.9.0";
 
 /// Cap on distinct <link rel=stylesheet> sheets fetched per page: link
 /// fetches are engine-triggered network I/O and must stay bounded.
@@ -69,13 +72,13 @@ fn run() -> i32 {
         return fetch_command(&args, &raw);
     }
     println!("neutral-browser {}", VERSION);
-    println!("STATUS=STAGE7_PAINT");
-    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE->LAYOUT->DISPLAY->PAINT");
+    println!("STATUS=STAGE8_PNG");
+    println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE->LAYOUT->DISPLAY->PAINT->PNG");
     println!(
-        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,layout-line-boxes,layout-inline-splitting,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,paint-text,paint-images,paint-border-styles,paint-png,paint-currentcolor,paint-compositing,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
+        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,layout-line-boxes,layout-inline-splitting,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,paint-text,paint-images,paint-border-styles,paint-currentcolor,paint-compositing,jpeg,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
     );
     println!(
-        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--layout] [--paint] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--layout] [--paint] [--css-file <path>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] | --self-test"
+        "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--layout] [--paint] [--png-output <f>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--layout] [--paint] [--css-file <path>] [--png-output <f>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] | --self-test"
     );
     0
 }
@@ -105,7 +108,9 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
     if rc != 0 {
         return rc;
     }
-    if has_flag(args, "--style") || has_flag(args, "--layout") || has_flag(args, "--paint") {
+    if has_flag(args, "--style") || has_flag(args, "--layout") || has_flag(args, "--paint")
+        || has_flag(args, "--png")
+    {
         let (rc, ap) = style_stage(
             &r.dom,
             flag(args, "--css-file").as_deref(),
@@ -119,19 +124,22 @@ fn dom_file_command(args: &[String], path: &str) -> i32 {
         }
         if let (Some(ap), true) = (
             ap,
-            has_flag(args, "--layout") || has_flag(args, "--paint"),
+            has_flag(args, "--layout")
+                || has_flag(args, "--paint")
+                || has_flag(args, "--png"),
         ) {
             let (lrc, lo) = layout_stage(&r.dom, &ap, flag(args, "--layout-output").as_deref());
             if lrc != 0 {
                 return lrc;
             }
             let Some(lo) = lo else { return 0 }; // lrc == 0 always yields Some
-            if has_flag(args, "--paint") {
+            if has_flag(args, "--paint") || has_flag(args, "--png") {
                 let prc = paint_stage(
                     &lo,
                     &ap,
                     flag(args, "--paint-output").as_deref(),
                     flag(args, "--paint-dump").as_deref(),
+                    flag(args, "--png-output").as_deref(),
                 );
                 if prc != 0 {
                     return prc;
@@ -362,13 +370,15 @@ fn layout_stage(
 
 /// Stage 7: display list + software paint. The paint pass is pure
 /// (paint::display_list + paint::raster); this wrapper only reports
-/// counters, writes the optional binary PPM (--paint-output) and the
-/// optional PAINT v1 dump (--paint-dump), mapping I/O failures to exit 5.
+/// counters, writes the optional binary PPM (--paint-output), the
+/// optional PAINT v1 dump (--paint-dump) and the optional PNG (--png-output,
+/// stage 8: png::encode over the same raster), mapping I/O failures to exit 5.
 fn paint_stage(
     lo: &layout::LayoutOut,
     ap: &css::StyleApply,
     ppm_path: Option<&str>,
     dump_path: Option<&str>,
+    png_path: Option<&str>,
 ) -> i32 {
     let dl = paint::display_list(lo, ap);
     let cv = paint::raster(&dl);
@@ -394,6 +404,25 @@ fn paint_stage(
                 println!("PAINT_SAVE_ERROR={}", e);
                 println!("PAINT=ERROR");
                 println!("ERROR_KIND=IO");
+                return 5;
+            }
+        }
+    }
+    if let Some(p) = png_path {
+        match png::encode(cv.w, cv.h, &cv.px) {
+            Some(bytes) => match std::fs::write(p, bytes) {
+                Ok(_) => println!("PAINT_PNG_SAVED={}", p),
+                Err(e) => {
+                    println!("PAINT_PNG_SAVE_ERROR={}", e);
+                    println!("PAINT=ERROR");
+                    println!("ERROR_KIND=IO");
+                    return 5;
+                }
+            },
+            None => {
+                println!("PAINT_PNG_ENCODE_ERROR=GEOMETRY");
+                println!("PAINT=ERROR");
+                println!("ERROR_KIND=INTERNAL");
                 return 5;
             }
         }
@@ -460,6 +489,7 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                 || has_flag(args, "--style")
                 || has_flag(args, "--layout")
                 || has_flag(args, "--paint")
+                || has_flag(args, "--png")
             {
                 let html_src = String::from_utf8_lossy(&rep.body).into_owned();
                 let r = dom::build(&html_src);
@@ -472,6 +502,7 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                 if has_flag(args, "--style")
                     || has_flag(args, "--layout")
                     || has_flag(args, "--paint")
+                    || has_flag(args, "--png")
                 {
                     let (rc, ap) = style_stage(
                         &r.dom,
@@ -486,7 +517,9 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                     }
                     if let (Some(ap), true) = (
                         ap,
-                        has_flag(args, "--layout") || has_flag(args, "--paint"),
+                        has_flag(args, "--layout")
+                            || has_flag(args, "--paint")
+                            || has_flag(args, "--png"),
                     ) {
                         let (lrc, lo) = layout_stage(
                             &r.dom,
@@ -497,12 +530,13 @@ fn fetch_command(args: &[String], raw: &str) -> i32 {
                             return lrc;
                         }
                         let Some(lo) = lo else { return 0 }; // lrc == 0 always yields Some
-                        if has_flag(args, "--paint") {
+                        if has_flag(args, "--paint") || has_flag(args, "--png") {
                             let prc = paint_stage(
                                 &lo,
                                 &ap,
                                 flag(args, "--paint-output").as_deref(),
                                 flag(args, "--paint-dump").as_deref(),
+                                flag(args, "--png-output").as_deref(),
                             );
                             if prc != 0 {
                                 return prc;
@@ -974,6 +1008,48 @@ fn self_test() -> i32 {
     assert_eq!(&ppm[..15], b"P6\n800 600\n255\n");
     assert_eq!(ppm.len(), 15 + 800 * 600 * 3);
     println!("PAINT_FLOW=PASS");
+
+    // ---- Stage 8: CRC-32 published vectors (ISO 3309, PNG chunk checksums) ----
+    assert_eq!(png::crc32(b"123456789"), 0xCBF4_3926);
+    assert_eq!(png::crc32(b""), 0x0000_0000);
+    assert_eq!(png::crc32(b"IEND"), 0xAE42_6082);
+    println!("PNG_CRC=PASS");
+
+    // ---- Stage 8: Adler-32 published vectors (RFC 1950 §8.2) ----
+    assert_eq!(png::adler32(b""), 0x0000_0001);
+    assert_eq!(png::adler32(b"abc"), 0x024D_0127);
+    assert_eq!(png::adler32(b"Wikipedia"), 0x11E6_0398);
+    println!("PNG_ADLER=PASS");
+
+    // ---- Stage 8: zlib stored stream + PNG encoder (frozen bytes) ----
+    assert_eq!(
+        png::zlib_store(b"abc"),
+        vec![0x78, 0x01, 0x01, 0x03, 0x00, 0xFC, 0xFF, 0x61, 0x62, 0x63,
+             0x02, 0x4D, 0x01, 0x27]
+    );
+    assert_eq!(
+        png::zlib_store(b""),
+        vec![0x78, 0x01, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x01]
+    );
+    // 2x1 red/blue frozen PNG (cross-checked against an external OS inflater)
+    let got = png::encode(2, 1, &[255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+    let frozen: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0xF4, 0x22, 0x7F, 0x8A, 0x00, 0x00, 0x00,
+        0x14, 0x49, 0x44, 0x41, 0x54, 0x78, 0x01, 0x01, 0x09, 0x00, 0xF6, 0xFF,
+        0x00, 0xFF, 0x00, 0x00, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0x0F, 0xF9, 0x03,
+        0xFD, 0xA6, 0x2E, 0x70, 0x51, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+        0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    assert_eq!(got, frozen);
+    assert!(png::encode(0, 1, &[]).is_none()); // invalid geometry rejected
+    assert!(png::encode(2, 1, &[1, 2, 3]).is_none()); // wrong buffer length
+    // full-size canvas: deterministic length, 30 stored blocks
+    let big = png::encode(800, 600, &[255u8; 800 * 600 * 4]).unwrap();
+    assert_eq!(big.len(), 1_920_813);
+    assert_eq!(&big[..8], &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+    println!("PNG_FLOW=PASS");
 
     0
 }

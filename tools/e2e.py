@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end machine verification for neutral-browser (stages 2-7).
+"""End-to-end machine verification for neutral-browser (stages 2-8).
 
 Starts a local HTTP test server, drives the REAL compiled binary and asserts
 its machine output line by line. Verdict per case (E2E_Tn_*=PASS/FAIL) and a
@@ -10,9 +10,11 @@ Build first: cargo build --locked
 """
 import hashlib
 import socket
+import struct
 import subprocess
 import sys
 import time
+import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -554,6 +556,11 @@ F 0 103 1 40 #ffff00
 F 61 103 2 40 #00ff00
 """
         EXPECTED_PPM_SHA256 = "3a31c50030e6e05c6547cc3e642a3a78386e79acf7707789aeb6b0b7211b6bbf"
+        # Frozen PNG sha256 for /painted (stage 8, verified against the real
+        # binary output AND an independent decoder: Python stdlib zlib inflates
+        # our stored-block IDAT and the scanlines match the PPM ground truth,
+        # see scripts/verify_png_reference.py):
+        EXPECTED_PNG_SHA256 = "ab57ab87f17e1808a2abeb15179749cf63b0a2c4af95a43cc83d7257f01e8d56"
 
         # T20: fetch -> DOM -> cascade -> STYLE -> LAYOUT (exact dump):
         # --layout implies --style (the STYLE block always precedes LAYOUT)
@@ -777,6 +784,121 @@ B5 html>body>p
                 check("E2E_T25B_PAINT_ERROR", o4.get("PAINT") == "ERROR", raw4)
                 check("E2E_T25B_KIND", o4.get("ERROR_KIND") == "IO", raw4)
                 check("E2E_T25B_EXIT5", rc == 5, raw4)
+
+            # ---- Stage 8: PNG output (own zlib-stored writer) ----
+
+            # T26: fetch -> ... -> PAINT -> PNG. The binary artifact is checked
+            # structurally (signature, chunk sequence, chunk CRCs, IHDR fields)
+            # AND semantically by an EXTERNAL decoder: Python stdlib zlib must
+            # inflate our stored-block stream to 600 scanlines (filter 0) whose
+            # pixels match the PPM ground truth of T23. Not circular: the
+            # inflater is the OS one, not our writer.
+            with tempfile.TemporaryDirectory() as td:
+                pngf = Path(td) / "out.png"
+                rc, o, raw = run_client(
+                    ["--fetch", f"{base}/painted", "--paint",
+                     "--png-output", str(pngf)]
+                )
+                check("E2E_T26_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
+                check("E2E_T26_PAINT_OK", o.get("PAINT") == "OK", raw)
+                check("E2E_T26_PNG_SAVED", o.get("PAINT_PNG_SAVED") == str(pngf), raw)
+                png_ok = pngf.exists() and pngf.stat().st_size == 1_920_813
+                check("E2E_T26_PNG_SIZE", png_ok, raw)
+                if png_ok:
+                    data = pngf.read_bytes()
+                    dig = hashlib.sha256(data).hexdigest()
+                    check("E2E_T26_PNG_SHA", dig == EXPECTED_PNG_SHA256, raw)
+                    check("E2E_T26_PNG_SIG", data[:8] == b"\x89PNG\r\n\x1a\n", raw)
+
+                    def chunks(d: bytes):
+                        off = 8
+                        while off < len(d):
+                            ln = struct.unpack(">I", d[off:off + 4])[0]
+                            typ = d[off + 4:off + 8]
+                            payload = d[off + 8:off + 8 + ln]
+                            crc = struct.unpack(">I", d[off + 8 + ln:off + 12 + ln])[0]
+                            good = (zlib.crc32(typ + payload) & 0xFFFFFFFF) == crc
+                            yield typ, payload, good
+                            off += 12 + ln
+
+                    ks = list(chunks(data))
+                    check(
+                        "E2E_T26_CHUNK_SEQ",
+                        [t.decode() for t, _, _ in ks] == ["IHDR", "IDAT", "IEND"],
+                        raw,
+                    )
+                    check("E2E_T26_CHUNK_CRC", all(g for _, _, g in ks), raw)
+                    ihdr = ks[0][1]
+                    check(
+                        "E2E_T26_IHDR",
+                        ihdr == struct.pack(">IIBBBBB", 800, 600, 8, 6, 0, 0, 0),
+                        raw,
+                    )
+                    rawpx = zlib.decompress(ks[1][1])
+                    check("E2E_T26_INFLATE_SIZE", len(rawpx) == 600 * (1 + 800 * 4), raw)
+
+                    def pix4(x: int, y: int) -> bytes:
+                        o_ = y * (1 + 800 * 4) + 1 + x * 4
+                        return rawpx[o_:o_ + 4]
+
+                    check("E2E_T26_FILTERS",
+                          all(rawpx[y * 3201] == 0 for y in range(600)), raw)
+                    check("E2E_T26_CANVAS_PIX", pix4(700, 500) == b"\xe0\xe0\xe0\xff", raw)
+                    check("E2E_T26_RED_PIX", pix4(150, 50) == b"\xff\x00\x00\xff", raw)
+                    # 50% blue over red -> (127, 0, 128), opaque
+                    check("E2E_T26_BLEND_PIX", pix4(50, 25) == bytes([127, 0, 128, 255]), raw)
+                    # frame content + borders, same probes as T23 but RGBA
+                    check("E2E_T26_BT_PIX", pix4(30, 101) == b"\x00\x80\x00\xff", raw)
+                    check("E2E_T26_BR_PIX", pix4(62, 110) == b"\x00\xff\x00\xff", raw)
+                    check("E2E_T26_BB_PIX", pix4(30, 145) == b"\x00\x00\xff\xff", raw)
+                    check("E2E_T26_BL_PIX", pix4(0, 110) == b"\xff\xff\x00\xff", raw)
+                    check("E2E_T26_BG_PIX", pix4(30, 110) == b"\xff\xff\xff\xff", raw)
+
+                # T26b: chunked framing -> identical PNG bytes
+                pngf2 = Path(td) / "out2.png"
+                rc, o2, raw2 = run_client(
+                    ["--fetch", f"{base}/painted-chunked", "--paint",
+                     "--png-output", str(pngf2)]
+                )
+                check("E2E_T26B_FETCH_OK", o2.get("FETCH") == "OK" and rc == 0, raw2)
+                check(
+                    "E2E_T26B_SAME_PNG",
+                    pngf2.exists()
+                    and hashlib.sha256(pngf2.read_bytes()).hexdigest() == EXPECTED_PNG_SHA256,
+                    raw2,
+                )
+
+            # T26c: --dom-file (user principal): PNG alongside PPM; unwritable
+            # PNG path -> honest IO error, exit 5
+            with tempfile.TemporaryDirectory() as td:
+                src_html = Path(td) / "u.html"
+                src_css = Path(td) / "u.css"
+                src_html.write_text(
+                    '<!doctype html><html><body><div id="ok">y</div></body></html>',
+                    encoding="utf-8",
+                )
+                src_css.write_text(
+                    "#ok { width: 10px; height: 10px; background-color: teal }\n",
+                    encoding="utf-8",
+                )
+                ppm4 = Path(td) / "o.ppm"
+                png4 = Path(td) / "o.png"
+                rc, o3, raw3 = run_client(
+                    ["--dom-file", str(src_html), "--css-file", str(src_css),
+                     "--paint", "--paint-output", str(ppm4), "--png-output", str(png4)]
+                )
+                check("E2E_T26C_BOTH_OK", o3.get("PAINT") == "OK" and rc == 0, raw3)
+                check("E2E_T26C_PPM_SAVED", ppm4.exists(), raw3)
+                check("E2E_T26C_PNG_SAVED", png4.exists()
+                      and png4.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n", raw3)
+                rc, o4, raw4 = run_client(
+                    ["--dom-file", str(src_html), "--css-file", str(src_css),
+                     "--paint", "--png-output",
+                     str(Path(td) / "no" / "such" / "dir" / "x.png")]
+                )
+                check("E2E_T26C_PNG_ERROR", o4.get("PAINT") == "ERROR", raw4)
+                check("E2E_T26C_KIND", o4.get("ERROR_KIND") == "IO", raw4)
+                check("E2E_T26C_EXIT5", rc == 5, raw4)
 
     finally:
         server.terminate()

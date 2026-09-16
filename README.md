@@ -5,9 +5,9 @@
 (`docs/MASTER_PROMPT.md`). Правило проекта: **каждый статус подтверждается машинным
 выводом, а не обещанием**.
 
-Текущая версия: **0.8.0 / STAGE7_PAINT**
+Текущая версия: **0.9.0 / STAGE8_PNG**
 
-Цепочка этапа 7: `URL → Broker → TCP → HTTP/1.1 → тело → HTML → DOM → CSS → STYLE (вычисленные значения) → LAYOUT (блочная раскладка) → DISPLAY LIST → PAINT (программный растеризатор, бинарный PPM) → машинный отчёт`
+Цепочка этапа 8: `URL → Broker → TCP → HTTP/1.1 → тело → HTML → DOM → CSS → STYLE (вычисленные значения) → LAYOUT (блочная раскладка) → DISPLAY LIST → PAINT (программный растеризатор, бинарный PPM и PNG) → машинный отчёт`
 
 ## Что уже РАБОТАЕТ (VERIFIED — машинное доказательство)
 
@@ -19,10 +19,10 @@
 | Разбор HTTP/1.1-ответа (статус, заголовки) | VERIFIED | `HTTP_PARSE=PASS` |
 | Chunked-декодер (RFC 9112) | VERIFIED | `CHUNKED_DECODE=PASS` + `E2E_T2_SHA` |
 | SHA-256 (FIPS 180-4, целостность тела) | VERIFIED | `SHA256_VECTORS=PASS` (3 опубликованных вектора NIST) |
-| Fetch-цепочка целиком через брокер | VERIFIED | `E2E_TEST=PASS` — случаи T1–T22 на живом локальном сервере |
+| Fetch-цепочка целиком через брокер | VERIFIED | `E2E_TEST=PASS` — 33 случая (T1–T26c, 208 проверок) на живом локальном сервере |
 | Путь отказа брокера (сокет не открывается) | VERIFIED | `E2E_T4_DENIED`, `NETWORK=CLOSED` |
 | Структурный инвариант: единственный `TcpStream::connect` в `src/network.rs`, за брокером | VERIFIED | `STAGE2_STRUCTURE=PASS` |
-| HTML-токенизатор (подмножество WHATWG §13.5): данные, теги, семейство атрибутов, комментарии (включая `--!>`), фиктивный комментарий, DOCTYPE (имя), RAWTEXT/RCDATA/PLAINTEXT, символьные ссылки | VERIFIED | `HTML_TOKENIZER=PASS` (самотест) + 86 юнит-тестов `cargo test` |
+| HTML-токенизатор (подмножество WHATWG §13.5): данные, теги, семейство атрибутов, комментарии (включая `--!>`), фиктивный комментарий, DOCTYPE (имя), RAWTEXT/RCDATA/PLAINTEXT, символьные ссылки | VERIFIED | `HTML_TOKENIZER=PASS` (самотест) + 101 юнит-тест `cargo test` |
 | Числовые символьные ссылки с нормативной таблицей windows-1252 (0x80–0x9F) и правилами U+FFFD | VERIFIED | юнит-тесты: `&#128;`→€, `&#xD800;`→FFFD, `&#0;`→FFFD |
 | Конструктор дерева DOM (подмножество WHATWG §13.2.6): подразумеваемые html/head/body, void-элементы, автозакрытие p/li/dd/dt, `</br>`→`<br>`, `image`→`img`, пропуск LF после pre/textarea/listing | VERIFIED | `DOM_TREE=PASS` (самотест) + юнит-тесты с точным дампом дерева |
 | Канонический дамп дерева DOM (замороженный формат, итеративный) | VERIFIED | `E2E_T9_DUMP_EXACT` — побайтовое равенство на хитром документе |
@@ -41,12 +41,16 @@
 | Канонический LAYOUT-дамп (замороженный формат `LAYOUT v1`: `B<инд> <путь>` + `rect x y w h` / `margin` / `padding` / `border` / `content w h`, порядок документа, display:none-поддеревья отсутствуют) | VERIFIED | `E2E_T20_DUMP_EXACT`, `E2E_T21_SAME_DUMP` (chunked), `E2E_T22_DUMP_EXACT` — побайтовое равенство |
 | Счётчики раскладки: `LAYOUT_BOXES`, `LAYOUT_HIDDEN` (элементы, чей собственный `display:none` убрал бокс), `LAYOUT_ERRORS` (неподдержанные значения известных свойств — учитываются и откатываются к умолчанию, работа не прерывается) | VERIFIED | `E2E_T20`, `E2E_T22_ERRORS` (width:red, display:flex → 2 ошибки, раскладка завершена) |
 | Глубина 10 000 вложенных div в раскладке без переполнения стека | VERIFIED | юнит-тест `deep_nesting_10000_no_overflow` (все проходы раскладки итеративные) |
-| Чистота модулей движка: `html.rs`/`dom.rs`/`css.rs`/`layout.rs`/`paint.rs` без сетевого и файлового I/O | VERIFIED | `STAGE3/4/6/7_STRUCTURE=PASS` (`tests/architecture.py`) |
+| Чистота модулей движка: `html.rs`/`dom.rs`/`css.rs`/`layout.rs`/`paint.rs`/`png.rs` без сетевого и файлового I/O | VERIFIED | `STAGE3/4/6/7/8_STRUCTURE=PASS` (`tests/architecture.py`) |
 | Разбор цветов (подмножество CSS Color 3): `#rgb`/`#rrggbb`, `rgb()`/`rgba()` числами 0–255 и процентами (3 или 4 компонента), 16 базовых именованных CSS 2.1, `transparent`; альфа компонуется `over` на пиксель (детерминированная целочисленная математика, округление вверх на 0.5) | VERIFIED | `PAINT_COLORS=PASS` (самотест) + юнит-тесты `paint.rs` (clamp 300→255, 50%→128, 0.5→128, мусор → None) |
 | Канва и пропагация фона (CSS 2.1 §14.2-подмножество): фиксированная канва VIEWPORT_W×VIEWPORT_H; валидный `background-color` у `html` красит всю канву (у html собственной заливки нет), иначе — у `body`; иначе белая канва; мусорное значение считается ошибкой ровно один раз | VERIFIED | `PAINT_FLOW=PASS` + юнит-тесты пропагации (html/body/ни одного/невалидный/display:none) |
 | DISPLAY LIST + PAINT: заливка фона по border-box бокса, затем solid-бордеры — 4 неперекрывающиеся полосы longhand `border-*-width/style/color` (прочие стили = ошибка, откат к none); цвет бордера: `border-X-color` → `color` → чёрный; порядок документа, поздние команды поверх ранних; клиппинг в растре (дамп показывает идеальную геометрию); alpha 0 не порождает команды | VERIFIED | `PAINT_FLOW=PASS` + юнит-тесты (бордеры, перекрытие, клиппинг, откат dashed) + `E2E_T23` (пиксельные пробы всех 4 полос и бленда) |
 | Канонический PAINT-дамп (замороженный формат `PAINT v1`: `CANVAS <hex>` + `F x y w h <hex>` в порядке рисования; цвет `#rrggbb` при a=255, иначе `#rrggbbaa`) и бинарный вывод PPM P6 (детерминированный, без сжатия) | VERIFIED | `E2E_T23_DUMP_EXACT`, `E2E_T23_PPM_SHA` (замороженный sha256), `E2E_T24_SAME_PPM` (chunked → те же байты) |
 | Глубина 10 000 вложенных div в построении display list и растре без переполнения стека | VERIFIED | юнит-тест `deep_nesting_10000_paint_no_overflow` (все проходы итеративные) |
+| CRC-32 (ISO 3309 / ITU-T V.42 — чексуммы чанков PNG) | VERIFIED | `PNG_CRC=PASS` (самотест): опубликованные вектора `"123456789"` → `0xCBF43926`, `"IEND"` → `0xAE426082` + юнит-тесты |
+| Adler-32 (RFC 1950 §8.2 — контрольная сумма zlib-потока) | VERIFIED | `PNG_ADLER=PASS` (самотест): опубликованные вектора `"abc"` → `0x024D0127`, `"Wikipedia"` → `0x11E60398` |
+| zlib-поток из STORED-блоков deflate (RFC 1950 + RFC 1951 §3.2.4): заголовок `78 01`, байто-выровненные блоки LEN/NLEN по 65535 байт, big-endian adler-трейлер | VERIFIED | `PNG_FLOW=PASS` + замороженные байты + многоблочный roundtrip (70 000 байт → 2 блока) + НЕЗАВИСИМЫЙ декодер: Python stdlib zlib надувает IDAT реального бинарника, скан-линии совпадают с PPM-эталоном |
+| PNG-энкодер (ISO/IEC 15948): 8-бит RGBA (color type 6), filter 0 на каждой скан-линии, без interlace, IHDR+IDAT+IEND; побайтно детерминированный; честный отказ на неверной геометрии/длине буфера | VERIFIED | `PNG_FLOW=PASS` + замороженные байты 2×1 и длина 1 920 813 для 800×600 + `E2E_T26_PNG_SHA` (замороженный sha256), `E2E_T26_CHUNK_SEQ/CRC/IHDR`, 9 RGBA-проб, T26b (chunked → те же байты) |
 
 ## Что НЕ реализовано (честно, анти-фасад из МАСТЕР-ПРОМПТА §23)
 
@@ -67,7 +71,7 @@
 | Рисование текста, изображений, градиентов, box-shadow, outline, border-radius, background-image/repeat/position, opacity, трансформации | NOT_IMPLEMENTED — paint рисует только сплошные заливки и solid-бордеры |
 | Стили бордера кроме `solid` (dashed/dotted/double/…) | NOT_IMPLEMENTED — такая декларация считается ошибкой `PAINT_ERRORS` и откатывается к `none` |
 | `currentcolor` как явное значение, hex-альфа `#rgba`/`#rrggbbaa`, пробельный синтаксис `rgb(1 2 3)` | NOT_IMPLEMENTED — такие значения = ошибка; цвет бордера без `border-X-color` берётся из `color`, иначе чёрный (аппроксимация initial currentcolor — задокументированное отклонение) |
-| PNG/JPEG вывод изображения | NOT_IMPLEMENTED — вывод бинарный PPM P6 (без сжатия, байт-в-байт детерминированный); PNG — этап 8+ |
+| JPEG/WebP вывод изображения | NOT_IMPLEMENTED — бинарный PNG (этап 8, собственный zlib-stored энкодер) и PPM P6 реализованы; JPEG требует DCT и выходит за подмножество |
 | Inline-элементы как inline | NOT_IMPLEMENTED — раскладываются как блоки (отклонение задокументировано в `layout.rs`); block-in-inline сплиттинга нет |
 | Таблица стилей агента пользователя (UA stylesheet) | NOT_IMPLEMENTED — замороженные подмножества: списки inline-by-default и never-rendered элементов в `layout.rs`; умолчания margin/padding = 0 |
 | Float / position / flex / grid / table-layout / min-max размеры / трансформации | NOT_IMPLEMENTED — раскладывается только статический блок-поток |
@@ -121,10 +125,13 @@ LAYOUT_RESOLVE=PASS
 LAYOUT_FLOW=PASS
 PAINT_COLORS=PASS
 PAINT_FLOW=PASS
+PNG_CRC=PASS
+PNG_ADLER=PASS
+PNG_FLOW=PASS
 ```
 
 Структурные тесты и сквозной прогон (поднимает локальный тест-сервер и гоняет
-реальный бинарник через 25 случаев):
+реальный бинарник через 33 случая / 208 проверок):
 
 ```text
 python3 tests/architecture.py
@@ -137,14 +144,17 @@ python3 tools/e2e.py
 cargo test
 ```
 
-Загрузка страницы, разбор в DOM, каскад стилей и раскладка:
+Загрузка страницы, разбор в DOM, каскад стилей, раскладка и отрисовка:
 
 ```text
 ./target/debug/neutral-browser --fetch http://127.0.0.1:18080/index.html --dom
 ./target/debug/neutral-browser --fetch <url> --dom --style --style-output <style.txt>
 ./target/debug/neutral-browser --fetch <url> --layout --layout-output <layout.txt>
+./target/debug/neutral-browser --fetch <url> --paint --paint-output <page.ppm> --paint-dump <paint.txt>
+./target/debug/neutral-browser --fetch <url> --paint --png-output <page.png>
 ./target/debug/neutral-browser --dom-file <page.html> --style --css-file <user.css> --style-output <style.txt>
 ./target/debug/neutral-browser --dom-file <page.html> --layout --css-file <user.css> --layout-output <layout.txt>
+./target/debug/neutral-browser --dom-file <page.html> --paint --css-file <user.css> --png-output <page.png>
 ```
 
 `--layout` подразумевает `--style`: каскад всегда выполняется перед раскладкой
@@ -214,6 +224,39 @@ URL), `STYLE_RULES`, `STYLE_DECLS` (выжившие декларации),
     каскадный победитель перекрывает; initial values отсутствуют;
     `rel="alternate stylesheet"` не применяется автоматически; порядок
     источников каскада — порядок документа по всем листам вместе.
+
+## Изменения относительно stage7 (0.8.0)
+
+- `src/png.rs` (новый, ~300 строк, чистый модуль — ноль I/O, ноль паник,
+  итеративно): CRC-32 (таблица 256, полином 0xEDB88320, опубликованные
+  вектора), Adler-32 (RFC 1950 §8.2), zlib-поток из STORED-блоков deflate
+  (RFC 1950 + RFC 1951 §3.2.4: `78 01`, блоки LEN/NLEN по 65535 байт,
+  big-endian adler-трейлер) и PNG-энкодер (ISO/IEC 15948: 8-бит RGBA,
+  color type 6, filter 0, без interlace, IHDR+IDAT+IEND); `encode` возвращает
+  Option и честно отклоняет неверную геометрию/длину буфера; +6 юнит-тестов
+  (101 всего), включая тестовый stored-инфлятор для roundtrip-проверки
+  собственных блоков.
+- `src/main.rs`: `VERSION 0.9.0`, `STATUS=STAGE8_PNG`, цепочка продлена до
+  `...->DISPLAY->PAINT->PNG`; `--png-output` (бинарный PNG поверх той же
+  растровой канвы; `--png` — короткая форма, оба подразумевают `--paint` →
+  `--layout` → `--style`); счётчики `PAINT_PNG_SAVED`/`PAINT_PNG_SAVE_ERROR`
+  (I/O → exit 5, как у PPM); самотест `PNG_CRC`/`PNG_ADLER`/`PNG_FLOW`;
+  NOT_IMPLEMENTED обновлён (-paint-png, +jpeg).
+- Анти-циркулярная верификация: замороженные ожидания получены НЕ из самого
+  энкодера — опубликованные вектора CRC/Adler, а полный PNG страницы
+  `/painted` продекодирован независимым инфлятором (Python stdlib zlib):
+  600 скан-линий с filter 0, пиксели совпали с PPM-эталоном T23
+  (`scripts/verify_png_reference.py`).
+- `tools/e2e.py`: T26 (структура PNG: подпись, последовательность чанков,
+  CRC каждого чанка, поля IHDR; sha256 заморожен `ab57ab87…e8d56`; внешний
+  декод IDAT + 9 RGBA-проб: канва/красный/бленд 50%/четыре полосы бордера/фон;
+  все 600 filter-байтов = 0), T26b (chunked → те же байты), T26c (PNG рядом
+  с PPM от --dom-file; невписываемый PNG-путь → exit 5, ERROR_KIND=IO).
+  Итого 33 случая / 208 проверок.
+- `tests/architecture.py`: фаза `STAGE8_STRUCTURE` (png.rs в whitelist
+  модулей/чистоты/слоинга с пустым графом импортов, токены, проводка
+  `--png-output` на обоих call-site paint_stage; README: STAGE8_PNG, PNG,
+  crc32, adler32); всего 17 фаз.
 
 ## Изменения относительно stage6 (0.7.0)
 

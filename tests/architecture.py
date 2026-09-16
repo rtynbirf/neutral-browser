@@ -164,6 +164,8 @@ REQUIRED = [
     "src/dom.rs",
     "src/css.rs",
     "src/layout.rs",
+    "src/paint.rs",
+    "src/png.rs",
     "tools/serve_test_page.py",
     "tools/e2e.py",
     "docs/ARCHITECTURE.md",
@@ -173,7 +175,7 @@ REQUIRED = [
 
 SRC_WHITELIST = {
     "main.rs", "policy.rs", "broker.rs", "url.rs", "http.rs", "network.rs",
-    "sha256.rs", "html.rs", "dom.rs", "css.rs", "layout.rs", "paint.rs",
+    "sha256.rs", "html.rs", "dom.rs", "css.rs", "layout.rs", "paint.rs", "png.rs",
 }
 
 
@@ -189,7 +191,7 @@ def check_files():
 
 
 # ---------------------------------------------------------------- P1: purity
-PURE_MODULES = ["policy", "broker", "url", "sha256", "html", "dom", "css", "http", "layout", "paint"]
+PURE_MODULES = ["policy", "broker", "url", "sha256", "html", "dom", "css", "http", "layout", "paint", "png"]
 
 FORBIDDEN_PURE = [
     "TcpStream", "UdpSocket", "std::net", "ToSocketAddrs", "lookup_host",
@@ -222,6 +224,7 @@ ALLOWED_IMPORTS = {
     "http": set(),
     "network": {"broker", "http", "policy", "url"},
     "paint": {"css", "layout", "dom", "sha256"},
+    "png": set(),
 }
 
 _CRATE_REF = re.compile(r"\bcrate::([a-z_][a-z_0-9]*)")
@@ -253,7 +256,7 @@ def check_layering():
 def stage_checks():
     stripped = {m: strip_rust_comments(read(f"src/{m}.rs"))
                 for m in ("policy", "broker", "url", "http", "network", "sha256",
-                          "html", "dom", "css", "layout", "paint", "main")}
+                          "html", "dom", "css", "layout", "paint", "png", "main")}
     main_txt = read("src/main.rs")  # CLI flags live inside string literals too
 
     def need(phase, mod, patterns):
@@ -352,11 +355,27 @@ def stage_checks():
     if not re.search(r"\bfn\s+paint_stage\b", main_txt):
         fail("STAGE7_STRUCTURE", "paint wrapper must live in main.rs")
 
+    # Stage 8: PNG output (own CRC-32 / Adler-32 / zlib-stored / PNG writer)
+    need("STAGE8_STRUCTURE", "png", [
+        r"\bpub\s+fn\s+crc32\b", r"\bpub\s+fn\s+adler32\b",
+        r"\bpub\s+fn\s+zlib_store\b", r"\bpub\s+fn\s+encode\b",
+        r'b"IHDR"', r'b"IDAT"', r'b"IEND"',
+    ])
+    need_main("STAGE8_STRUCTURE", ["--png-output", "PAINT_PNG_SAVED",
+                                   "PAINT_PNG_SAVE_ERROR"])
+    # --png must participate in the paint chain (implies layout -> style):
+    # both call sites of paint_stage must receive the png path argument
+    n_calls = len(re.findall(r"paint_stage\s*\(", main_txt))
+    n_wired = len(re.findall(r"flag\(args,\s*\"--png-output\"\)", main_txt))
+    if n_calls < 2 or n_wired < 2:
+        fail("STAGE8_STRUCTURE", f"--png-output must be wired at both paint_stage "
+                                 f"call sites (calls={n_calls}, wired={n_wired})")
+
 
 # ---------------------------------------------------------------- P4: panic discipline
 _PANIC = re.compile(r"\.unwrap\(\)|\.expect\(|\bpanic!|\btodo!|\bunimplemented!")
 ZERO_PANIC_MODULES = ["policy", "broker", "network", "dom", "html", "http",
-                      "sha256", "url", "layout", "paint"]
+                      "sha256", "url", "layout", "paint", "png"]
 CSS_PANIC_CEILING = 3  # documented tokenizer invariant-unwraps (validated hex / bounds)
 
 
@@ -445,7 +464,7 @@ def check_cargo():
 README_PHRASES = [
     "NOT_IMPLEMENTED", "VERIFIED", "foster", "at-rules", "наследование",
     "initial", "STYLE v2", "LAYOUT v1", "PAINT v1", "PPM", "рендеринг",
-    "STAGE7_PAINT", "HTTPS",
+    "STAGE7_PAINT", "STAGE8_PNG", "PNG", "crc32", "adler32", "HTTPS",
 ]
 
 
@@ -492,7 +511,8 @@ def check_compile():
 # ---------------------------------------------------------------- runner
 _MARKERS = ["FILES", "PURE_MODULES", "LAYERING", "STAGE1_STRUCTURE", "STAGE2_STRUCTURE",
             "STAGE3_STRUCTURE", "STAGE4_STRUCTURE", "STAGE5_STRUCTURE",
-            "STAGE6_STRUCTURE", "STAGE7_STRUCTURE", "PANIC_DISCIPLINE", "LIMITS",
+            "STAGE6_STRUCTURE", "STAGE7_STRUCTURE", "STAGE8_STRUCTURE",
+            "PANIC_DISCIPLINE", "LIMITS",
             "CARGO_ZERO_DEP", "README_HONESTY", "TOOLS_SYNTAX", "COMPILE"]
 
 check_files()
