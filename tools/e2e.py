@@ -900,6 +900,60 @@ B5 html>body>p
                 check("E2E_T26C_KIND", o4.get("ERROR_KIND") == "IO", raw4)
                 check("E2E_T26C_EXIT5", rc == 5, raw4)
 
+        # ---- T27: GOLOGRAMMA v1 — real-world autonomous stress fixture ----
+        # A 406 KB self-contained page (718 elements, depth 17, one 322 KB
+        # <style> with @media/@keyframes/@font-face, custom properties, flex,
+        # grid) through --dom-file -> STYLE -> LAYOUT -> PAINT -> PNG. The
+        # engine must digest it WITHOUT a crash and report honest counters.
+        # Today it paints nothing: text gives no height (no line boxes yet)
+        # and the page's colors are var(--custom-props) — both are honestly
+        # NOT_IMPLEMENTED, so the canvas is pure white. The frozen counters
+        # pin today's baseline: later stages move them deliberately, never
+        # silently. Fixture sha256 pins the input bytes.
+        fix = ROOT / "tests" / "fixtures" / "gologramma_v1.html"
+        check(
+            "E2E_T27_FIXTURE_SHA",
+            fix.is_file()
+            and hashlib.sha256(fix.read_bytes()).hexdigest()
+            == "2a6d10fad0241051525a428beff850613c84286c94a0acccb24472bd39301f11",
+        )
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            pngf = Path(td) / "gologramma.png"
+            rc, o, raw = run_client(
+                ["--dom-file", str(fix), "--layout", "--paint",
+                 "--png-output", str(pngf)]
+            )
+            check("E2E_T27_EXIT0", rc == 0, raw)
+            check("E2E_T27_DOM_OK",
+                  o.get("DOM") == "OK" and o.get("PARSE_ERRORS") == "0", raw)
+            check("E2E_T27_ELEMENTS", o.get("DOM_ELEMENTS") == "718", raw)
+            check("E2E_T27_STYLE_OK", o.get("STYLE") == "OK", raw)
+            check("E2E_T27_STYLE_RULES", o.get("STYLE_RULES") == "252", raw)
+            check("E2E_T27_STYLE_DECLS", o.get("STYLE_DECLS") == "1105", raw)
+            check("E2E_T27_AT_RULES", o.get("STYLE_AT_RULES_SKIPPED") == "31", raw)
+            check("E2E_T27_STYLE_ERRORS", o.get("STYLE_ERRORS") == "38", raw)
+            check("E2E_T27_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "662", raw)
+            check("E2E_T27_INHERITED", o.get("STYLE_INHERITED") == "2159", raw)
+            check("E2E_T27_LAYOUT_OK", o.get("LAYOUT") == "OK", raw)
+            check("E2E_T27_BOXES", o.get("LAYOUT_BOXES") == "506", raw)
+            check("E2E_T27_HIDDEN", o.get("LAYOUT_HIDDEN") == "18", raw)
+            check("E2E_T27_LAYOUT_ERRORS", o.get("LAYOUT_ERRORS") == "126", raw)
+            check("E2E_T27_PAINT_OK", o.get("PAINT") == "OK", raw)
+            check("E2E_T27_CANVAS", o.get("PAINT_CANVAS") == "#ffffff", raw)
+            check("E2E_T27_NOTHING_PAINTED",
+                  o.get("PAINT_BOXES") == "0" and o.get("PAINT_CMDS") == "0", raw)
+            png_ok = pngf.exists() and pngf.stat().st_size == 1_920_813
+            check("E2E_T27_PNG_SIZE", png_ok, raw)
+            if png_ok:
+                check(
+                    "E2E_T27_PNG_SHA",
+                    hashlib.sha256(pngf.read_bytes()).hexdigest()
+                    == "441a669d8477c68e3ba6df5fab2cba3b50f318f5359e2f6e5cd148facc4b370c",
+                    raw,
+                )
+
     finally:
         server.terminate()
         try:
