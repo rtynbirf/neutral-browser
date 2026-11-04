@@ -424,6 +424,32 @@ def stage_checks():
     if not re.search(r"pub\s+const\s+APCA_FLOOR_X100:\s*i64\s*=\s*7500;", read("src/paint.rs")):
         fail("STAGE9_STRUCTURE", "APCA_FLOOR_X100 must stay 7500 (Lc 75 body-text floor)")
 
+    # Stage 10: var() + custom properties — substitution lives in css.rs
+    # (pure), counters surface in main.rs, honest semantics pinned
+    need("STAGE10_STRUCTURE", "css", [
+        r"pub\s+const\s+MAX_VAR_DEPTH",
+        r"fn\s+is_var_call", r"fn\s+var_call_span",
+        r"fn\s+split_var_inner", r"fn\s+valid_custom_name",
+        r"fn\s+var_ref_names", r"fn\s+resolve_value",
+        r"vars_defined", r"var_refs", r"var_fallback_used",
+        r"var_unresolved", r"var_cycles",
+        r"starts_with\(\"--\"\)",  # case-sensitive custom names preserved
+    ])
+    need_main("STAGE10_STRUCTURE", [
+        "STYLE_VARS_DEFINED", "STYLE_VAR_REFS", "STYLE_VAR_FALLBACK_USED",
+        "STYLE_VAR_UNRESOLVED", "STYLE_VAR_CYCLES",
+    ])
+    # var() depth cap pinned: a deterministic engine must not recurse freely
+    if not re.search(r"pub\s+const\s+MAX_VAR_DEPTH:\s*usize\s*=\s*32;", read("src/css.rs")):
+        fail("STAGE10_STRUCTURE", "MAX_VAR_DEPTH must stay 32 (deterministic substitution cap)")
+    # custom property names are case-SENSITIVE (CSS spec): the declaration
+    # branch must fold case ONLY for non-custom names (selector-side folds
+    # are unrelated and stay unconditional)
+    css_txt = strip_rust_comments(read("src/css.rs"))
+    if not re.search(r'if\s+nm\.starts_with\("--"\)\s*\{\s*nm\.clone\(\)', css_txt):
+        fail("STAGE10_STRUCTURE", "declaration names must keep custom-property case "
+                                 "(conditional fold: --names verbatim, others lowercase)")
+
 
 # ---------------------------------------------------------------- P4: panic discipline
 _PANIC = re.compile(r"\.unwrap\(\)|\.expect\(|\bpanic!|\btodo!|\bunimplemented!")

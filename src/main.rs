@@ -1,4 +1,4 @@
-//! neutral-browser — user-owned browser, stage 9: line layout + text paint.
+//! neutral-browser — user-owned browser, stage 10: var() + custom properties.
 //!
 //! Chain: URL -> Broker -> TCP -> HTTP/1.1 -> body -> HTML -> DOM -> CSS
 //!        -> STYLE -> LAYOUT -> DISPLAY LIST -> PAINT.
@@ -44,7 +44,7 @@ use std::process::exit;
 use broker::Broker;
 use policy::{Capability, Decision, Policy};
 
-const VERSION: &str = "0.10.0";
+const VERSION: &str = "0.11.0";
 
 /// Cap on distinct <link rel=stylesheet> sheets fetched per page: link
 /// fetches are engine-triggered network I/O and must stay bounded.
@@ -82,10 +82,10 @@ fn run() -> i32 {
         return fetch_command(&args, &raw);
     }
     println!("neutral-browser {}", VERSION);
-    println!("STATUS=STAGE9_TEXT");
+    println!("STATUS=STAGE10_VARS");
     println!("CHAIN=URL->BROKER->TCP->HTTP/1.1->BODY->HTML->DOM->CSS->STYLE->LAYOUT->DISPLAY->PAINT->PNG");
     println!(
-        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,layout-inline-block-atomic,layout-margin-collapsing,paint-images,paint-border-styles,paint-currentcolor,paint-compositing,font-vector-outlines,font-shaping,jpeg,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
+        "NOT_IMPLEMENTED=https,http2,http3,redirects,dns-config,css-at-rules,css-initial-values,css-inherit-keyword,css-link-media-attr,css-import-following,css-advanced-selectors,css-var-in-strings,layout-float,layout-positioning,layout-flex,layout-grid,layout-table,layout-margin-collapsing,layout-minmax,layout-ua-stylesheet,layout-inline-block-atomic,layout-margin-collapsing,paint-images,paint-border-styles,paint-currentcolor,paint-compositing,font-vector-outlines,font-shaping,jpeg,javascript,foster-parenting,adoption-agency,foreign-content,template-modes,full-named-entities"
     );
     println!(
         "USAGE: neutral-browser --fetch <url> [--dom] [--style] [--layout] [--paint] [--png-output <f>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] [--output <f>] [--subject <s>] [--timeout-ms <n>] | --dom-file <path> [--style] [--layout] [--paint] [--css-file <path>] [--png-output <f>] [--dom-output <f>] [--style-output <f>] [--layout-output <f>] [--paint-output <f>] [--paint-dump <f>] | --self-test"
@@ -334,6 +334,11 @@ fn style_stage(
     let ap = css::apply(tree, &rules);
     println!("STYLE_ELEMENTS_STYLED={}", ap.styled);
     println!("STYLE_PROPS={}", ap.props);
+    println!("STYLE_VARS_DEFINED={}", ap.vars_defined);
+    println!("STYLE_VAR_REFS={}", ap.var_refs);
+    println!("STYLE_VAR_FALLBACK_USED={}", ap.var_fallback_used);
+    println!("STYLE_VAR_UNRESOLVED={}", ap.var_unresolved);
+    println!("STYLE_VAR_CYCLES={}", ap.var_cycles);
     println!("STYLE_INHERITED={}", ap.inherited);
     println!("STYLE_INHERITED_ELEMENTS={}", ap.inherited_elements);
     if let Some(out_path) = style_output {

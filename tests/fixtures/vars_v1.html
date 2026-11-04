@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<title>neutral-browser stage10 vars fixture</title>
+<style>
+html { background-color: #ffffff; --accent: #0055aa; --danger: #aa0055 }
+body { font-size: 16px }
+.ok { color: var(--accent) }
+.inherit { color: var(--accent) }
+.fb { color: var(--missing, #116611) }
+.gone { color: var(--nope) }
+.case { --Tok: #770077; color: var(--Tok) }
+.miss-case { color: var(--tok) }
+.loop { --a: var(--b); --b: var(--a); color: var(--a) }
+.bg { color: #ffffff; background-color: var(--danger) }
+.mix { color: var(--accent); width: 300px }
+</style>
+</head>
+<body>
+<div class="ok">accent from html custom prop</div>
+<div class="inherit">child inherits resolved var</div>
+<div class="fb">fallback for missing var</div>
+<div class="gone">unresolved var drops declaration</div>
+<div class="case">case-sensitive custom name</div>
+<div class="miss-case">wrong case must not resolve</div>
+<div class="loop">cycle invalidates both props</div>
+<div class="bg">white text on var background</div>
+<div class="mix">mixed var and plain declarations</div>
+</body>
+</html>

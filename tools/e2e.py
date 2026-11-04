@@ -24,7 +24,7 @@ BIN = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "debug" / "n
 # expected stage. A green suite against a stale binary is a machine lie
 # (happened in real life: target/debug stayed at 0.9.0 while the tree was
 # already 0.10.0 — every frozen hash "matched" the wrong engine).
-EXPECTED_VERSION = "0.10.0"
+EXPECTED_VERSION = "0.11.0"
 
 PAGE = (
     b"<!doctype html><html><head><title>neutral-browser stage2 e2e</title></head>"
@@ -1017,7 +1017,16 @@ B# html>body>p::lines
             check("E2E_T27_AT_RULES", o.get("STYLE_AT_RULES_SKIPPED") == "31", raw)
             check("E2E_T27_STYLE_ERRORS", o.get("STYLE_ERRORS") == "38", raw)
             check("E2E_T27_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "662", raw)
-            check("E2E_T27_INHERITED", o.get("STYLE_INHERITED") == "2159", raw)
+            # stage 10 re-freeze (honest correction): winners with var() used
+            # to leak RAW "var(--x)" text into inherited values (inflating the
+            # count to 2159 with values nobody could paint); unresolved var()
+            # declarations now drop at computed-value time -> the page's real
+            # inherited flow is 1815. GOLOGRAMMA defines 0 custom props and
+            # references vars 541 times: STYLE_VAR_UNRESOLVED=541 is the page
+            # honestly confessing it references what it never defined.
+            check("E2E_T27_INHERITED", o.get("STYLE_INHERITED") == "1815", raw)
+            check("E2E_T27_VAR_UNRESOLVED",
+                  o.get("STYLE_VAR_UNRESOLVED") == "541", raw)
             check("E2E_T27_LAYOUT_OK", o.get("LAYOUT") == "OK", raw)
             check("E2E_T27_BOXES", o.get("LAYOUT_BOXES") == "675", raw)
             check("E2E_T27_HIDDEN", o.get("LAYOUT_HIDDEN") == "18", raw)
@@ -1100,6 +1109,60 @@ B# html>body>p::lines
                     "E2E_T28_PNG_SHA",
                     hashlib.sha256(png9.read_bytes()).hexdigest()
                     == "7d229e14ca31f65ded179ba30fccdd3554266b3cb3ce71a1bd0381a888c3cefb",
+                    raw,
+                )
+
+        # ---- T29: var() + custom properties (stage 10) ----
+        # tests/fixtures/vars_v1.html: define-on-html/use-on-children via
+        # inheritance of RESOLVED values, fallback for a missing name, an
+        # unresolved var that drops its declaration (inherited value keeps
+        # flowing), case-sensitive custom names (--Tok vs --tok), a var()
+        # reference cycle (--a <-> --b invalidates both), white text on a
+        # var() background, and var/plain mixed declarations. Counters are
+        # the honest part: 3 vars defined, 9 refs, 1 fallback, 3 unresolved
+        # (2 misses + 1 use of a cycle member), 2 cycles.
+        fix10 = ROOT / "tests" / "fixtures" / "vars_v1.html"
+        check(
+            "E2E_T29_FIXTURE_SHA",
+            fix10.is_file()
+            and hashlib.sha256(fix10.read_bytes()).hexdigest()
+            == "a9ea7172c09f02feba834b190c5309b29a7c742e9e9df9ecd07d1ab7beb8f3bb",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            png10 = Path(td) / "vars.png"
+            rc, o, raw = run_client(
+                ["--dom-file", str(fix10), "--style", "--layout", "--paint",
+                 "--png", "--png-output", str(png10)]
+            )
+            check("E2E_T29_EXIT0", rc == 0, raw)
+            check("E2E_T29_VARS_DEFINED",
+                  o.get("STYLE_VARS_DEFINED") == "3", raw)
+            check("E2E_T29_VAR_REFS", o.get("STYLE_VAR_REFS") == "9", raw)
+            check("E2E_T29_VAR_FALLBACK",
+                  o.get("STYLE_VAR_FALLBACK_USED") == "1", raw)
+            check("E2E_T29_VAR_UNRESOLVED",
+                  o.get("STYLE_VAR_UNRESOLVED") == "3", raw)
+            check("E2E_T29_VAR_CYCLES",
+                  o.get("STYLE_VAR_CYCLES") == "2", raw)
+            check("E2E_T29_PROPS", o.get("STYLE_PROPS") == "13", raw)
+            check("E2E_T29_LINES", o.get("LAYOUT_LINES") == "10", raw)
+            check("E2E_T29_PAINT_CHARS",
+                  o.get("PAINT_TEXT_CHARS") == "222", raw)
+            check("E2E_T29_HEALTH_LH",
+                  o.get("HEALTH_LINE_HEIGHT_VIOLATIONS") == "0", raw)
+            check("E2E_T29_HEALTH_CONTRAST",
+                  o.get("HEALTH_CONTRAST_VIOLATIONS") == "0", raw)
+            check("E2E_T29_WCAG_MIN",
+                  o.get("PAINT_WCAG_MIN_X100") == "716", raw)
+            check("E2E_T29_APCA_MIN",
+                  o.get("PAINT_APCA_MIN_LC_X100") == "8433", raw)
+            png10_ok = png10.exists() and png10.stat().st_size == 1_920_813
+            check("E2E_T29_PNG_SIZE", png10_ok, raw)
+            if png10_ok:
+                check(
+                    "E2E_T29_PNG_SHA",
+                    hashlib.sha256(png10.read_bytes()).hexdigest()
+                    == "b5de6abdd59a41359698bdc02bd09b659869619b11d2e873959adf0aa1fc3cd7",
                     raw,
                 )
 

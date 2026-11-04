@@ -334,7 +334,7 @@ fn apca_lc_x100(fg: Rgba, bg: Rgba) -> i64 {
     } else {
         // Lc = (sapc - 0.027) * 100 on the APCA scale; x100 for the frozen
         // contract -> * 10000
-        (((sapc - 0.027) * 10000.0).round() as i64)
+        ((sapc - 0.027) * 10000.0).round() as i64
     }
 }
 

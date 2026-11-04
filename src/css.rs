@@ -31,7 +31,7 @@
 //!   become a dimension (custom-property units are not supported)
 
 use crate::dom::{Dom, NodeData, NodeId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_INPUT_CHARS: usize = 8 * 1024 * 1024;
 
@@ -739,9 +739,14 @@ fn parse_decls(
         }
         let name = match &toks[i].t {
             Tok::Ident(nm) => {
-                let nm = nm.to_ascii_lowercase();
                 i += 1;
-                nm
+                // CSS custom property names (--x) are case-SENSITIVE;
+                // regular property names fold to lowercase
+                if nm.starts_with("--") {
+                    nm.clone()
+                } else {
+                    nm.to_ascii_lowercase()
+                }
             }
             _ => {
                 errors += 1;
@@ -1221,6 +1226,12 @@ pub struct StyleApply {
     pub inline_errors: usize,      // parse errors of inline style attributes
     pub inherited: usize,          // total inherited (~) values materialized
     pub inherited_elements: usize, // elements carrying >=1 inherited value
+    // stage 10 (STAGE10_VARS): var()/custom properties, honest counters
+    pub vars_defined: usize,      // own custom properties that computed OK
+    pub var_refs: usize,          // var( calls encountered during substitution
+    pub var_fallback_used: usize, // substitutions that fell back
+    pub var_unresolved: usize,    // var( refs with no value and no usable fallback
+    pub var_cycles: usize,        // custom props invalidated by reference cycles
 }
 
 /// Apply the cascade (author origin) plus inheritance to every element.
@@ -1270,6 +1281,176 @@ pub fn apply(dom: &Dom, rules: &[Rule]) -> StyleApply {
 }
 
 type CascadeKey = (u8, u8, u32, u32, u32, usize);
+
+// ---------------- stage 10: var() substitution ----------------
+
+/// Substitution recursion cap: CSS has no fixed depth limit, but a
+/// deterministic engine needs one; beyond it the value is treated as
+/// unresolvable (counted in var_unresolved, never a panic).
+pub const MAX_VAR_DEPTH: usize = 32;
+
+#[derive(Default)]
+struct VarStats {
+    refs: usize,
+    fallback_used: usize,
+    unresolved: usize,
+}
+
+fn var_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-' || c >= '\u{80}'
+}
+
+/// True when `chars[i..]` starts a `var(` function call: the four chars
+/// match and the preceding char is not an identifier character (so
+/// `-var(`, `foovar(` do not count).
+fn is_var_call(chars: &[char], i: usize) -> bool {
+    if i + 4 > chars.len() {
+        return false;
+    }
+    if chars[i] != 'v' || chars[i + 1] != 'a' || chars[i + 2] != 'r' || chars[i + 3] != '(' {
+        return false;
+    }
+    if i > 0 && var_ident_char(chars[i - 1]) {
+        return false;
+    }
+    true
+}
+
+/// For a `var(` starting at index `v` (chars[v] == 'v'):
+/// (inner_start, inner_end, close_paren_index). `None` = unbalanced.
+fn var_call_span(chars: &[char], v: usize) -> Option<(usize, usize, usize)> {
+    let mut depth = 0i32;
+    let mut j = v + 3; // at '('
+    while j < chars.len() {
+        match chars[j] {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((v + 4, j, j));
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Split the inside of var() at the FIRST top-level comma:
+/// (custom-name, Option<fallback>). Trailing/leading ws trimmed.
+fn split_var_inner(inner: &[char]) -> Option<(String, Option<String>)> {
+    let mut depth = 0i32;
+    for k in 0..inner.len() {
+        match inner[k] {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                let name: String = inner[..k].iter().collect();
+                let fb: String = inner[k + 1..].iter().collect();
+                return Some((name.trim().to_string(), Some(fb.trim().to_string())));
+            }
+            _ => {}
+        }
+    }
+    let name: String = inner.iter().collect();
+    Some((name.trim().to_string(), None))
+}
+
+fn valid_custom_name(s: &str) -> bool {
+    let cs: Vec<char> = s.chars().collect();
+    cs.len() >= 3
+        && cs[0] == '-'
+        && cs[1] == '-'
+        && cs[2..].iter().all(|&c| var_ident_char(c))
+}
+
+/// Names referenced by var() calls inside `value` (top level or nested).
+fn var_ref_names(value: &str) -> Vec<String> {
+    let chars: Vec<char> = value.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if is_var_call(&chars, i) {
+            if let Some((ins, ine, _)) = var_call_span(&chars, i) {
+                if let Some((name, _fb)) = split_var_inner(&chars[ins..ine]) {
+                    out.push(name);
+                }
+                i = ins; // keep scanning inside the call for nested var()
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Substitute every var() in `value` against `vars`.
+/// - name has a value -> splice the (already resolved) value;
+/// - name unknown, fallback present -> splice the fallback (it may itself
+///   contain var() -> resolved recursively);
+/// - name unknown, no fallback -> the whole value is invalid: None.
+fn resolve_value(
+    value: &str,
+    vars: &BTreeMap<String, String>,
+    st: &mut VarStats,
+    depth: usize,
+) -> Option<String> {
+    if depth > MAX_VAR_DEPTH {
+        st.unresolved += 1;
+        return None;
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+    let mut i = 0usize;
+    let mut replaced = false;
+    while i < chars.len() {
+        if is_var_call(&chars, i) {
+            if let Some((ins, ine, close)) = var_call_span(&chars, i) {
+                st.refs += 1;
+                let (name, fallback) = split_var_inner(&chars[ins..ine])?;
+                if !valid_custom_name(&name) {
+                    st.unresolved += 1;
+                    return None;
+                }
+                match vars.get(&name) {
+                    Some(v) => {
+                        out.extend(v.chars());
+                        replaced = true;
+                        i = close + 1;
+                        continue;
+                    }
+                    None => match fallback {
+                        Some(fb) => {
+                            st.fallback_used += 1;
+                            let r = resolve_value(&fb, vars, st, depth + 1)?;
+                            out.extend(r.chars());
+                            replaced = true;
+                            i = close + 1;
+                            continue;
+                        }
+                        None => {
+                            st.unresolved += 1;
+                            return None;
+                        }
+                    },
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    if !replaced {
+        return Some(chars.iter().collect());
+    }
+    let s: String = out.iter().collect();
+    if s.contains("var(") {
+        // a fallback spliced text that itself references vars
+        resolve_value(&s, vars, st, depth + 1)
+    } else {
+        Some(s)
+    }
+}
 
 fn style_element(
     dom: &Dom,
@@ -1327,18 +1508,101 @@ fn style_element(
     for (_, d) in &entries {
         m.insert(d.name.as_str(), d.value.as_str());
     }
-    for (k, v) in &m {
-        if is_inherited(k) {
-            computed.insert((*k).to_string(), (*v).to_string());
+
+    // ---- stage 10 (STAGE10_VARS): custom properties + var() ----
+    let mut st = VarStats::default();
+    // environment: parent's computed custom properties first
+    let mut vars: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in parent_inherited.iter() {
+        if k.starts_with("--") {
+            vars.insert(k.clone(), v.clone());
         }
     }
-    let decls: Vec<(String, String)> = m
+    // own custom-property winners (raw values, may reference vars)
+    let own_custom: Vec<(String, String)> = m
         .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .filter(|(k, _)| k.starts_with("--"))
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect();
+    // fixpoint: a prop resolves once every var() it references is either a
+    // parent var or an already-resolved own prop; props stuck referencing
+    // each other never resolve -> reference cycles (counted, invalidated)
+    let mut resolved_own: BTreeMap<String, String> = BTreeMap::new();
+    let mut broken: BTreeSet<String> = BTreeSet::new();
+    loop {
+        let mut progress = false;
+        for (name, raw) in &own_custom {
+            if resolved_own.contains_key(name) || broken.contains(name) {
+                continue;
+            }
+            let pending_ref = var_ref_names(raw)
+                .iter()
+                .any(|r| own_custom.iter().any(|(n, _)| n == r) && !resolved_own.contains_key(r));
+            if pending_ref {
+                continue; // wait for the referenced own prop
+            }
+            match resolve_value(raw, &vars, &mut st, 0) {
+                Some(v) => {
+                    resolved_own.insert(name.clone(), v.clone());
+                    // the env grows immediately: chains --b: var(--a) resolve
+                    // in the same pass once --a is resolved
+                    vars.insert(name.clone(), v);
+                    progress = true;
+                }
+                None => {
+                    broken.insert(name.clone());
+                    progress = true;
+                }
+            }
+        }
+        if !progress || resolved_own.len() + broken.len() == own_custom.len() {
+            break;
+        }
+    }
+    for (name, _) in &own_custom {
+        if !resolved_own.contains_key(name) && !broken.contains(name) {
+            ap.var_cycles += 1; // stuck in a reference cycle -> invalid
+        }
+    }
+    ap.vars_defined += resolved_own.len();
+    for (name, v) in &resolved_own {
+        vars.insert(name.clone(), v.clone());
+        // children inherit the RESOLVED value (computed-value time)
+        computed.insert(name.clone(), v.clone());
+    }
+    // normal winners: substitute var(); unresolved -> declaration invalid
+    // at computed-value time -> dropped (an inherited property naturally
+    // falls back to the parent's value already sitting in `computed`)
+    let mut decls: Vec<(String, String)> = Vec::new();
+    for (k, v) in &m {
+        if k.starts_with("--") {
+            continue; // custom props: only the resolved ones survive
+        }
+        if v.contains("var(") {
+            if let Some(rv) = resolve_value(v, &vars, &mut st, 0) {
+                decls.push(((*k).to_string(), rv));
+            }
+        } else {
+            decls.push(((*k).to_string(), (*v).to_string()));
+        }
+    }
+    for (name, v) in &resolved_own {
+        decls.push((name.clone(), v.clone()));
+    }
+    decls.sort();
+    // surviving own winners override the inherited environment for children
+    for (k, v) in &decls {
+        if is_inherited(k) {
+            computed.insert(k.clone(), v.clone());
+        }
+    }
+    ap.var_refs += st.refs;
+    ap.var_fallback_used += st.fallback_used;
+    ap.var_unresolved += st.unresolved;
+    let own_names: BTreeSet<&str> = decls.iter().map(|(k, _)| k.as_str()).collect();
     let inherited: Vec<(String, String)> = computed
         .iter()
-        .filter(|(k, _)| !m.contains_key(k.as_str()))
+        .filter(|(k, _)| !own_names.contains(k.as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     ap.props += decls.len();
@@ -1383,6 +1647,11 @@ pub fn dump(ap: &StyleApply) -> String {
 /// in this engine, and there are no initial values: an inherited property
 /// with no ancestor value simply stays absent (documented subset).
 pub fn is_inherited(name: &str) -> bool {
+    // CSS custom properties always inherit (their whole point is to be
+    // read by descendants through var()).
+    if name.starts_with("--") {
+        return true;
+    }
     matches!(
         name,
         "color"
@@ -1878,6 +2147,158 @@ mod tests {
         let o = parse("div div div { color: red }"); // deep descendant chains
         let ap = apply(&doc.dom, &o.rules);
         assert_eq!(ap.styled, n - 2);
+    }
+
+    // ---------------- stage 10: var() + custom properties ----------------
+
+    fn apply_style(src: &str, css_text: &str) -> StyleApply {
+        let doc = crate::dom::build(src);
+        let o = parse(css_text);
+        apply(&doc.dom, &o.rules)
+    }
+
+    fn own_value<'a>(ap: &'a StyleApply, idx: usize, name: &str) -> Option<&'a str> {
+        // dom::build synthesizes html/head/body -> for "<div><p>..</p></div>"
+        // the div is E3 and the p is E4 (see STYLE dump contract)
+        let e = ap.elements.iter().find(|e| e.index == idx)?;
+        e.decls
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn var_basic_substitution_and_inheritance() {
+        // custom prop defined on :root-ish first div, used by a child
+        let src = "<div><p>x</p></div>";
+        let ap = apply_style(
+            src,
+            "div { --accent: #ff0000; color: var(--accent) } p { color: var(--accent) }",
+        );
+        // div (E0) resolves its own use; p (E1) resolves via inheritance
+        assert_eq!(own_value(&ap, 3, "color"), Some("#ff0000"));
+        assert_eq!(own_value(&ap, 4, "color"), Some("#ff0000"));
+        assert_eq!(ap.vars_defined, 1);
+        assert_eq!(ap.var_refs, 2);
+        assert_eq!(ap.var_unresolved, 0);
+        assert_eq!(ap.var_fallback_used, 0);
+        assert_eq!(ap.var_cycles, 0);
+    }
+
+    #[test]
+    fn var_custom_name_is_case_sensitive() {
+        let ap = apply_style(
+            "<p>x</p>",
+            "p { --Acc: blue; color: var(--Acc) }",
+        );
+        assert_eq!(own_value(&ap, 3, "color"), Some("blue"));
+        assert_eq!(own_value(&ap, 3, "--Acc"), Some("blue"));
+        // a different-case lookup must NOT resolve
+        let ap2 = apply_style("<p>x</p>", "p { --Acc: blue; color: var(--acc) }");
+        assert_eq!(own_value(&ap2, 3, "color"), None);
+        assert_eq!(ap2.var_unresolved, 1);
+    }
+
+    #[test]
+    fn var_fallback_used_when_missing() {
+        let ap = apply_style("<p>x</p>", "p { color: var(--nope, #123456) }");
+        assert_eq!(own_value(&ap, 3, "color"), Some("#123456"));
+        assert_eq!(ap.var_fallback_used, 1);
+        assert_eq!(ap.var_unresolved, 0);
+    }
+
+    #[test]
+    fn var_unresolved_drops_declaration_parent_value_survives() {
+        // parent sets color; child references an undefined var with no
+        // fallback -> the child's declaration is dropped and the inherited
+        // parent value keeps flowing (CSS: unset == inherit here)
+        let src = "<div><p>x</p></div>";
+        let ap = apply_style(src, "div { color: #00ff00 } p { color: var(--gone) }");
+        assert_eq!(own_value(&ap, 3, "color"), Some("#00ff00"));
+        assert_eq!(own_value(&ap, 4, "color"), None); // own winner dropped
+        let e1 = ap.elements.iter().find(|e| e.index == 4).unwrap();
+        assert!(e1.inherited.iter().any(|(k, v)| k == "color" && v == "#00ff00"));
+        assert_eq!(ap.var_unresolved, 1);
+    }
+
+    #[test]
+    fn var_cycle_invalidates_both_props() {
+        let ap = apply_style(
+            "<p>x</p>",
+            "p { --a: var(--b); --b: var(--a); color: var(--a) }",
+        );
+        assert_eq!(ap.var_cycles, 2); // both custom props invalid
+        assert_eq!(own_value(&ap, 3, "--a"), None);
+        assert_eq!(own_value(&ap, 3, "--b"), None);
+        assert_eq!(own_value(&ap, 3, "color"), None); // use of invalid var
+        assert_eq!(ap.var_unresolved, 1); // the color use
+    }
+
+    #[test]
+    fn var_self_reference_is_cycle() {
+        let ap = apply_style("<p>x</p>", "p { --a: var(--a) }");
+        assert_eq!(ap.var_cycles, 1);
+        assert_eq!(own_value(&ap, 3, "--a"), None);
+    }
+
+    #[test]
+    fn var_chain_resolves_in_order() {
+        let ap = apply_style(
+            "<p>x</p>",
+            "p { --a: red; --b: var(--a); --c: var(--b); color: var(--c) }",
+        );
+        assert_eq!(own_value(&ap, 3, "--c"), Some("red"));
+        assert_eq!(own_value(&ap, 3, "color"), Some("red"));
+        assert_eq!(ap.var_refs, 3);
+        assert_eq!(ap.var_unresolved, 0);
+    }
+
+    #[test]
+    fn var_nested_fallback_resolves() {
+        let ap = apply_style(
+            "<p>x</p>",
+            "p { color: var(--x, var(--y, green)); background-color: var(--y) }",
+        );
+        assert_eq!(own_value(&ap, 3, "color"), Some("green"));
+        assert_eq!(own_value(&ap, 3, "background-color"), None); // no fallback
+        assert_eq!(ap.var_fallback_used, 2); // outer miss + inner miss
+        assert_eq!(ap.var_unresolved, 1);
+    }
+
+    #[test]
+    fn var_multi_token_value_splices() {
+        let ap = apply_style(
+            "<p>x</p>",
+            "p { --w: 120px; width: var(--w); }",
+        );
+        assert_eq!(own_value(&ap, 3, "width"), Some("120px"));
+    }
+
+    #[test]
+    fn var_bad_name_is_unresolved() {
+        // var(bare) without -- is invalid per CSS
+        let ap = apply_style("<p>x</p>", "p { color: var(bare) }");
+        assert_eq!(own_value(&ap, 3, "color"), None);
+        assert_eq!(ap.var_unresolved, 1);
+    }
+
+    #[test]
+    fn var_no_var_no_refs() {
+        let ap = apply_style("<p>x</p>", "p { color: red }");
+        assert_eq!(ap.var_refs, 0);
+        assert_eq!(ap.vars_defined, 0);
+        // foovar( and -var( are not var() calls
+        let ap2 = apply_style("<p>x</p>", "p { --a: foovar(--b) }");
+        assert_eq!(own_value(&ap2, 3, "--a"), Some("foovar(--b)"));
+        assert_eq!(ap2.var_refs, 0);
+    }
+
+    #[test]
+    fn var_inline_style_uses_pipeline() {
+        let src = "<p style=\"--local: purple; color: var(--local)\">x</p>";
+        let ap = apply_style(src, "p { }");
+        assert_eq!(own_value(&ap, 3, "color"), Some("purple"));
+        assert_eq!(ap.vars_defined, 1);
     }
 }
 

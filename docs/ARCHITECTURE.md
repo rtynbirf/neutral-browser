@@ -349,3 +349,44 @@ stored-block inflater additionally round-trips multi-block streams. The
 output remains byte-for-byte deterministic. `png.rs` is a pure module (no
 I/O, no panics, empty import graph); the file write happens in main.rs under
 the same I/O error discipline as PPM (exit 5).
+
+## Stage 10: var() + custom properties (v0.11.0)
+
+CSS custom properties and `var()` substitution, honest by construction:
+
+```
+--name: raw value            (declaration, case-SENSITIVE name)
+apply():                     (per element, document order)
+  vars(env)   = parent computed custom props
+  own_custom  = cascade winners named --*
+  fixpoint:   resolve own props against env + already-resolved own props
+              (chains resolve within the pass; props stuck referencing
+              each other = reference cycle -> invalid, STYLE_VAR_CYCLES)
+  vars(env)  += resolved own props        (children inherit RESOLVED values)
+  normal decl: value contains var( -> substitute; unresolved without a
+              usable fallback -> declaration dropped at computed-value
+              time; an inherited property naturally falls back to the
+              parent's value already present in `computed`
+```
+
+- Substitution grammar: `var(` only as a function call (preceding char is
+  not an ident char — `foovar(`/`-var(` do not count); balanced-paren span;
+  first TOP-LEVEL comma splits name/fallback; fallback may itself contain
+  var() (resolved recursively).
+- Determinism: `MAX_VAR_DEPTH = 32` — deeper nesting counts as unresolved,
+  never a panic; the whole engine keeps the zero-panic discipline.
+- Counters (main.rs report): `STYLE_VARS_DEFINED` (own custom props that
+  computed OK), `STYLE_VAR_REFS` (var() calls encountered),
+  `STYLE_VAR_FALLBACK_USED`, `STYLE_VAR_UNRESOLVED` (no value, no fallback),
+  `STYLE_VAR_CYCLES` (props invalidated by cycles).
+- Honest correction on the stress fixture: GOLOGRAMMA references var() 541
+  times while defining 0 custom properties -> `STYLE_VAR_UNRESOLVED=541`;
+  `STYLE_INHERITED` 2159 -> 1815 (raw var() text no longer leaks into
+  inherited values). The PNG is byte-identical (var()-values were never
+  paintable — but now the engine SAYS so instead of staying silent).
+- Gate: STAGE10_STRUCTURE pins the substitution functions in css.rs (pure
+  module), the counters in main.rs, `MAX_VAR_DEPTH=32` NAME+VALUE, and the
+  conditional case-fold (custom names verbatim, other names lowercased).
+- e2e T29: tests/fixtures/vars_v1.html — define/use via inheritance,
+  fallback, unresolved drop, case mismatch (--Tok vs --tok), reference
+  cycle, white-on-var-background contrast; counters and PNG sha256 frozen.
