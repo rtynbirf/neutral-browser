@@ -168,6 +168,8 @@ REQUIRED = [
     "src/png.rs",
     "tools/serve_test_page.py",
     "tools/e2e.py",
+    "tools/manifest.py",
+    "MANIFEST.sha256",
     "docs/ARCHITECTURE.md",
     "docs/DEPENDENCY_POLICY.md",
     "README.md",
@@ -176,6 +178,7 @@ REQUIRED = [
 SRC_WHITELIST = {
     "main.rs", "policy.rs", "broker.rs", "url.rs", "http.rs", "network.rs",
     "sha256.rs", "html.rs", "dom.rs", "css.rs", "layout.rs", "paint.rs", "png.rs",
+    "font_data.rs",
 }
 
 
@@ -191,7 +194,7 @@ def check_files():
 
 
 # ---------------------------------------------------------------- P1: purity
-PURE_MODULES = ["policy", "broker", "url", "sha256", "html", "dom", "css", "http", "layout", "paint", "png"]
+PURE_MODULES = ["policy", "broker", "url", "sha256", "html", "dom", "css", "http", "layout", "paint", "png", "font_data"]
 
 FORBIDDEN_PURE = [
     "TcpStream", "UdpSocket", "std::net", "ToSocketAddrs", "lookup_host",
@@ -220,11 +223,12 @@ ALLOWED_IMPORTS = {
     "html": set(),
     "dom": {"html"},
     "css": {"dom"},
-    "layout": {"css", "dom"},
+    "layout": {"css", "dom", "font_data"},
     "http": set(),
     "network": {"broker", "http", "policy", "url"},
-    "paint": {"css", "layout", "dom", "sha256"},
+    "paint": {"css", "layout", "dom", "sha256", "font_data"},
     "png": set(),
+    "font_data": set(),
 }
 
 _CRATE_REF = re.compile(r"\bcrate::([a-z_][a-z_0-9]*)")
@@ -256,7 +260,7 @@ def check_layering():
 def stage_checks():
     stripped = {m: strip_rust_comments(read(f"src/{m}.rs"))
                 for m in ("policy", "broker", "url", "http", "network", "sha256",
-                          "html", "dom", "css", "layout", "paint", "png", "main")}
+                          "html", "dom", "css", "layout", "paint", "png", "font_data", "main")}
     main_txt = read("src/main.rs")  # CLI flags live inside string literals too
 
     def need(phase, mod, patterns):
@@ -371,11 +375,60 @@ def stage_checks():
         fail("STAGE8_STRUCTURE", f"--png-output must be wired at both paint_stage "
                                  f"call sites (calls={n_calls}, wired={n_wired})")
 
+    # Stage 9: line layout + text paint (LAYOUT v2, PAINT v2) + embedded
+    # bitmap font + HUMAN_FIRST health norms measured on every line/text
+    need("STAGE9_STRUCTURE", "font_data", [
+        r"pub\s+const\s+EM", r"pub\s+const\s+ASCENT",
+        r"pub\s+struct\s+Glyph", r"pub\s+static\s+GLYPHS",
+        r"pub\s+static\s+BITMAPS", r"pub\s+fn\s+lookup",
+        r"pub\s+fn\s+advance_of", r"pub\s+fn\s+ascent_px",
+    ])
+    need("STAGE9_STRUCTURE", "layout", [
+        r"pub\s+enum\s+LH\b", r"pub\s+fn\s+line_h_px",
+        r"pub\s+const\s+LH_DEFAULT", r"pub\s+const\s+MEASURE_MAX_CHARS",
+        r"pub\s+const\s+FS_MAX", r"pub\s+struct\s+Line\b",
+        r"pub\s+struct\s+WordOut", r"fn\s+layout_lines",
+        r"fn\s+flush_lines", r"lh_violations", r"len_violations",
+        r"missing_glyphs", r"line_chars_max",
+    ])
+    need("STAGE9_STRUCTURE", "paint", [
+        r"fn\s+wcag_ratio_x100", r"fn\s+apca_lc_x100",
+        r"pub\s+const\s+WCAG_FLOOR_X100", r"pub\s+const\s+APCA_FLOOR_X100",
+        r"fn\s+effective_bg", r"text_cmds", r"text_chars",
+        r"wcag_min_x100", r"apca_min_x100",
+    ])
+    need_main("STAGE9_STRUCTURE", [
+        "LAYOUT_LINES", "LAYOUT_TEXT_CHARS", "LAYOUT_BREAKS",
+        "LAYOUT_MISSING_GLYPHS", "LAYOUT_LINE_CHARS_MAX",
+        "PAINT_TEXT_RUNS", "PAINT_TEXT_CHARS",
+        "PAINT_WCAG_MIN_X100", "PAINT_APCA_MIN_LC_X100",
+        "HEALTH_LINE_HEIGHT_VIOLATIONS", "HEALTH_LINE_LENGTH_VIOLATIONS",
+        "HEALTH_CONTRAST_VIOLATIONS", "HEALTH_APCA_VIOLATIONS",
+    ])
+    # generated file: hand edits are forbidden (see the file header)
+    if "НЕ ПРАВИТЬ РУКАМИ" not in read("src/font_data.rs"):
+        fail("STAGE9_STRUCTURE", "font_data.rs must carry the GENERATED header")
+    # font_data must stay data-only: no allocation, no collection types
+    fd_txt = strip_rust_comments(read("src/font_data.rs"))
+    if re.search(r"\b(Vec|String|Box|BTreeMap|HashMap)\b", fd_txt):
+        fail("STAGE9_STRUCTURE", "font_data.rs must stay static-data-only "
+                                 "(no Vec/String/Box/maps) -> binary lookup on arrays")
+    # HUMAN_FIRST norms: NAME + VALUE both pinned (charter: a norm is frozen
+    # as a stage requirement, not a tunable)
+    if not re.search(r"pub\s+const\s+LH_DEFAULT:\s*f64\s*=\s*1\.5;", read("src/layout.rs")):
+        fail("STAGE9_STRUCTURE", "LH_DEFAULT must stay 1.5 (HUMAN_FIRST line-height floor)")
+    if not re.search(r"pub\s+const\s+MEASURE_MAX_CHARS:\s*usize\s*=\s*75;", read("src/layout.rs")):
+        fail("STAGE9_STRUCTURE", "MEASURE_MAX_CHARS must stay 75 (HUMAN_FIRST measure norm)")
+    if not re.search(r"pub\s+const\s+WCAG_FLOOR_X100:\s*i64\s*=\s*450;", read("src/paint.rs")):
+        fail("STAGE9_STRUCTURE", "WCAG_FLOOR_X100 must stay 450 (WCAG 2.2 1.4.3 AA)")
+    if not re.search(r"pub\s+const\s+APCA_FLOOR_X100:\s*i64\s*=\s*7500;", read("src/paint.rs")):
+        fail("STAGE9_STRUCTURE", "APCA_FLOOR_X100 must stay 7500 (Lc 75 body-text floor)")
+
 
 # ---------------------------------------------------------------- P4: panic discipline
 _PANIC = re.compile(r"\.unwrap\(\)|\.expect\(|\bpanic!|\btodo!|\bunimplemented!")
 ZERO_PANIC_MODULES = ["policy", "broker", "network", "dom", "html", "http",
-                      "sha256", "url", "layout", "paint", "png"]
+                      "sha256", "url", "layout", "paint", "png", "font_data"]
 CSS_PANIC_CEILING = 3  # documented tokenizer invariant-unwraps (validated hex / bounds)
 
 
@@ -465,6 +518,8 @@ README_PHRASES = [
     "NOT_IMPLEMENTED", "VERIFIED", "foster", "at-rules", "наследование",
     "initial", "STYLE v2", "LAYOUT v1", "PAINT v1", "PPM", "рендеринг",
     "STAGE7_PAINT", "STAGE8_PNG", "PNG", "crc32", "adler32", "HTTPS",
+    "LAYOUT v2", "PAINT v2", "STAGE9_TEXT", "line box", "битмап-шрифт",
+    "WCAG", "APCA", "HEALTH", "HUMAN_FIRST",
 ]
 
 
@@ -488,6 +543,23 @@ def check_tools():
         fail("TOOLS_SYNTAX", "tools/e2e.py lost its contract surface")
     if "def do_GET" not in read("tools/serve_test_page.py"):
         fail("TOOLS_SYNTAX", "tools/serve_test_page.py lost its HTTP surface")
+    man = read("tools/manifest.py")
+    if "def freeze" not in man or "def verify" not in man:
+        fail("TOOLS_SYNTAX", "tools/manifest.py lost its freeze/verify surface")
+
+
+def check_manifest():
+    # FREEZE discipline (harvested from the ФУНДАМЕНТ review, Task 55):
+    # every frozen artifact's CURRENT bytes must equal the LATEST sha256
+    # recorded in the append-only MANIFEST.sha256. A silent byte change to
+    # any contract file fails the gate; a deliberate change re-freezes with
+    # a new stage tag (visible in git). No CommitTime claims - the anchor is
+    # git history + this gate, not the file itself.
+    r = subprocess.run([sys.executable, str(ROOT / "tools" / "manifest.py"), "verify"],
+                       capture_output=True, text=True)
+    tail = (r.stdout or "").strip().splitlines()[-1:] or ["no output"]
+    if r.returncode != 0:
+        fail("MANIFEST_VERIFY", "manifest verify failed: " + " | ".join(tail))
 
 
 # ---------------------------------------------------------------- P9: compile gate
@@ -512,8 +584,10 @@ def check_compile():
 _MARKERS = ["FILES", "PURE_MODULES", "LAYERING", "STAGE1_STRUCTURE", "STAGE2_STRUCTURE",
             "STAGE3_STRUCTURE", "STAGE4_STRUCTURE", "STAGE5_STRUCTURE",
             "STAGE6_STRUCTURE", "STAGE7_STRUCTURE", "STAGE8_STRUCTURE",
+            "STAGE9_STRUCTURE",
             "PANIC_DISCIPLINE", "LIMITS",
-            "CARGO_ZERO_DEP", "README_HONESTY", "TOOLS_SYNTAX", "COMPILE"]
+            "CARGO_ZERO_DEP", "README_HONESTY", "TOOLS_SYNTAX", "COMPILE",
+            "MANIFEST_VERIFY"]
 
 check_files()
 check_pure()
@@ -524,6 +598,7 @@ check_limits()
 check_cargo()
 check_readme()
 check_tools()
+check_manifest()
 check_compile()
 
 for phase in _MARKERS:

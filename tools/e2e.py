@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end machine verification for neutral-browser (stages 2-8).
+"""End-to-end machine verification for neutral-browser (stages 2-9).
 
 Starts a local HTTP test server, drives the REAL compiled binary and asserts
 its machine output line by line. Verdict per case (E2E_Tn_*=PASS/FAIL) and a
@@ -19,6 +19,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "target" / "debug" / "neutral-browser"
+
+# Stale-binary guard: e2e MUST refuse to run against a binary that is not the
+# expected stage. A green suite against a stale binary is a machine lie
+# (happened in real life: target/debug stayed at 0.9.0 while the tree was
+# already 0.10.0 — every frozen hash "matched" the wrong engine).
+EXPECTED_VERSION = "0.10.0"
 
 PAGE = (
     b"<!doctype html><html><head><title>neutral-browser stage2 e2e</title></head>"
@@ -63,6 +69,15 @@ def main() -> int:
     if not BIN.exists():
         print(f"E2E_TEST=FAIL binary-not-found: {BIN}")
         return 1
+
+    # refuse stale binaries BEFORE any case runs
+    ver = subprocess.run([str(BIN), "--version"], capture_output=True, text=True, timeout=10)
+    ver_line = ver.stdout.splitlines()[0].strip() if ver.stdout else ""
+    if ver_line != f"neutral-browser {EXPECTED_VERSION}":
+        print(f"E2E_TEST=FAIL stale-binary: got '{ver_line}', expected "
+              f"'neutral-browser {EXPECTED_VERSION}' — rebuild: cargo build --locked")
+        return 1
+    print(f"E2E_BIN_VERSION=PASS ({ver_line})")
 
     port = free_port()
     server = subprocess.Popen(
@@ -507,60 +522,87 @@ E6 html>body>p
         # Frozen dump of /layout (verified against the real binary, then
         # frozen): centering, border-box, display:none, % width, indefinite
         # % height -> auto. Ordinals include title/style (head subtree).
-        EXPECTED_LAYOUT_DUMP = """LAYOUT v1
+        # Stage 9 (v0.10.0) re-froze it deliberately: dump is LAYOUT v2 —
+        # anonymous ::lines boxes carry LN/WORD records; the default strut is
+        # 16px font x 1.5 line-height = 24px (the HUMAN_FIRST floor baked in),
+        # so html/body grew 40 -> 64 and the formerly empty B8 now holds one
+        # 24px line of its <p> text.
+        EXPECTED_LAYOUT_DUMP = """LAYOUT v2
 B0 html
-  rect 0 0 800 40
+  rect 0 0 800 64
   margin 0 0 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 800 40
+  content 800 64
 B4 html>body
-  rect 0 0 800 40
+  rect 0 0 800 64
   margin 0 0 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 800 40
+  content 800 64
 B5 html>body>div
-  rect 200 0 400 40
+  rect 200 0 400 64
   margin 0 200 0 200
   padding 0 0 0 0
   border 0 0 0 0
-  content 400 40
+  content 400 64
 B6 html>body>div>div
   rect 200 0 100 40
   margin 0 300 0 0
   padding 5 5 5 5
   border 2 2 2 2
   content 86 26
+B# html>body>div>div::lines
+  rect 207 7 86 24
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 86 24
+  LN 0 24 1 10
+  WORD 0 6 a
 B8 html>body>div>div
-  rect 200 40 200 0
+  rect 200 40 200 24
   margin 0 200 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 200 0
+  content 200 24
+B# html>body>div>div::lines
+  rect 200 40 200 24
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 200 24
+  LN 0 24 1 10
+  WORD 0 8 p
 """
 
-# Frozen PAINT v1 dump and PPM sha256 for /painted (verified against the
+# Frozen PAINT v2 dump and PPM sha256 for /painted (verified against the
 # real binary output; see paint.rs for the format contract):
 # boxes: html propagated canvas, body transparent, #red fill, #blue fill
 # (50% blue over red), #frame white fill + 4 solid border strips
 # (content-box: border box 63x47 = 1+60+2 x 3+40+4).
-        EXPECTED_PAINT_DUMP = """PAINT v1
+# Stage 9 (v0.10.0) re-froze it: T commands paint glyphs from the embedded
+# bitmap font and carry honest contrast measurements (WCAG ratio x100 and
+# APCA Lc x100 against the effective background under the glyph).
+        EXPECTED_PAINT_DUMP = """PAINT v2
 CANVAS #e0e0e0
 F 0 0 200 100 #ff0000
-F 0 0 100 50 #0000ff80
+T 0 15 #000000 #ff0000 525 3995 r
+F 0 24 100 50 #0000ff80
+T 0 39 #000000 #7f0080 221 1421 b
 F 0 100 63 47 #ffffff
 F 0 100 63 3 #008000
 F 0 143 63 4 #0000ff
 F 0 103 1 40 #ffff00
 F 61 103 2 40 #00ff00
+T 1 118 #000000 #ffffff 2100 10604 f
 """
-        EXPECTED_PPM_SHA256 = "3a31c50030e6e05c6547cc3e642a3a78386e79acf7707789aeb6b0b7211b6bbf"
+        EXPECTED_PPM_SHA256 = "7f12ecea89fc22768a39e6969255802abae1a86819fc6ac037f1050bebe8a0fd"
         # Frozen PNG sha256 for /painted (stage 8, verified against the real
         # binary output AND an independent decoder: Python stdlib zlib inflates
         # our stored-block IDAT and the scanlines match the PPM ground truth,
         # see scripts/verify_png_reference.py):
-        EXPECTED_PNG_SHA256 = "ab57ab87f17e1808a2abeb15179749cf63b0a2c4af95a43cc83d7257f01e8d56"
+        EXPECTED_PNG_SHA256 = "71e1c188829c701a981d49083d54beb23e7220f8ff206ede1e515cf294e9d6bf"
 
         # T20: fetch -> DOM -> cascade -> STYLE -> LAYOUT (exact dump):
         # --layout implies --style (the STYLE block always precedes LAYOUT)
@@ -575,7 +617,7 @@ F 61 103 2 40 #00ff00
             check("E2E_T20_RULES", o.get("STYLE_RULES") == "5", raw)
             check("E2E_T20_DECLS", o.get("STYLE_DECLS") == "11", raw)
             check("E2E_T20_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "5", raw)
-            check("E2E_T20_BOXES", o.get("LAYOUT_BOXES") == "5", raw)
+            check("E2E_T20_BOXES", o.get("LAYOUT_BOXES") == "7", raw)
             check("E2E_T20_HIDDEN", o.get("LAYOUT_HIDDEN") == "2", raw)
             check("E2E_T20_ERRORS", o.get("LAYOUT_ERRORS") == "0", raw)
             check("E2E_T20_LAYOUT_OK", o.get("LAYOUT") == "OK" and rc == 0, raw)
@@ -593,7 +635,7 @@ F 61 103 2 40 #00ff00
                  "--layout-output", str(out_dump2)]
             )
             check("E2E_T21_FETCH_OK", o2.get("FETCH") == "OK" and rc == 0, raw2)
-            check("E2E_T21_BOXES", o2.get("LAYOUT_BOXES") == "5", raw2)
+            check("E2E_T21_BOXES", o2.get("LAYOUT_BOXES") == "7", raw2)
             check(
                 "E2E_T21_SAME_DUMP",
                 out_dump2.exists()
@@ -614,37 +656,63 @@ F 61 103 2 40 #00ff00
             "#flex { display: flex }\n"
             "p { height: 30px; padding: 2px }\n"
         )
-        EXPECTED_USER_LAYOUT = """LAYOUT v1
+        # Stage 9 (v0.10.0) re-froze: text gives .bad two 24px lines (x + f),
+        # p keeps height 30 from CSS but its text still lays one line
+        EXPECTED_USER_LAYOUT = """LAYOUT v2
 B0 html
-  rect 0 0 800 34
+  rect 0 0 800 82
   margin 0 0 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 800 34
+  content 800 82
 B2 html>body
-  rect 0 0 800 34
+  rect 0 0 800 82
   margin 0 0 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 800 34
+  content 800 82
 B3 html>body>div
-  rect 0 0 800 0
+  rect 0 0 800 48
   margin 0 0 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 800 0
+  content 800 48
+B# html>body>div::lines
+  rect 0 0 800 24
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 800 24
+  LN 0 24 1 10
+  WORD 0 3 x
 B4 html>body>div>div
-  rect 0 0 100 0
+  rect 0 24 100 24
   margin 0 700 0 0
   padding 0 0 0 0
   border 0 0 0 0
-  content 100 0
+  content 100 24
+B# html>body>div>div::lines
+  rect 0 24 100 24
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 100 24
+  LN 0 24 1 10
+  WORD 0 4 f
 B5 html>body>p
-  rect 0 0 800 34
+  rect 0 48 800 34
   margin 0 0 0 0
   padding 2 2 2 2
   border 0 0 0 0
   content 796 30
+B# html>body>p::lines
+  rect 2 50 796 24
+  margin 0 0 0 0
+  padding 0 0 0 0
+  border 0 0 0 0
+  content 796 24
+  LN 0 24 4 40
+  WORD 0 5 para
 """
         with tempfile.TemporaryDirectory() as td:
             src_html = Path(td) / "user.html"
@@ -657,7 +725,7 @@ B5 html>body>p
                  str(src_css), "--layout-output", str(out_dump)]
             )
             check("E2E_T22_LAYOUT_OK", o.get("LAYOUT") == "OK" and rc == 0, raw)
-            check("E2E_T22_BOXES", o.get("LAYOUT_BOXES") == "5", raw)
+            check("E2E_T22_BOXES", o.get("LAYOUT_BOXES") == "8", raw)
             check("E2E_T22_HIDDEN", o.get("LAYOUT_HIDDEN") == "1", raw)
             check("E2E_T22_ERRORS", o.get("LAYOUT_ERRORS") == "2", raw)
             check(
@@ -690,8 +758,8 @@ B5 html>body>p
                 check("E2E_T23_FETCH_OK", o.get("FETCH") == "OK" and rc == 0, raw)
                 check("E2E_T23_LAYOUT_OK", o.get("LAYOUT") == "OK", raw)
                 check("E2E_T23_CANVAS", o.get("PAINT_CANVAS") == "#e0e0e0", raw)
-                check("E2E_T23_BOXES", o.get("PAINT_BOXES") == "3", raw)
-                check("E2E_T23_CMDS", o.get("PAINT_CMDS") == "7", raw)
+                check("E2E_T23_BOXES", o.get("PAINT_BOXES") == "6", raw)
+                check("E2E_T23_CMDS", o.get("PAINT_CMDS") == "10", raw)
                 check("E2E_T23_ERRORS", o.get("PAINT_ERRORS") == "0", raw)
                 check("E2E_T23_PAINT_OK", o.get("PAINT") == "OK", raw)
                 check(
@@ -722,6 +790,11 @@ B5 html>body>p
                     check("E2E_T23_BB_PIX", pix(30, 145) == b"\x00\x00\xff", raw)
                     check("E2E_T23_BL_PIX", pix(0, 110) == b"\xff\xff\x00", raw)
                     check("E2E_T23_BG_PIX", pix(30, 110) == b"\xff\xff\xff", raw)
+                    # stage 9: glyphs rasterize from the embedded bitmap font —
+                    # pure-black pixels of 'r' (on red) and 'f' (on the white
+                    # frame) prove the text raster reached the canvas
+                    check("E2E_T23_TEXT_PIX_R", pix(3, 6) == b"\x00\x00\x00", raw)
+                    check("E2E_T23_TEXT_PIX_F", pix(8, 106) == b"\x00\x00\x00", raw)
 
                 # T24: chunked framing -> identical bytes -> identical artifacts
                 ppm2 = Path(td) / "out2.ppm"
@@ -731,7 +804,7 @@ B5 html>body>p
                      "--paint-output", str(ppm2), "--paint-dump", str(pDump2)]
                 )
                 check("E2E_T24_FETCH_OK", o2.get("FETCH") == "OK" and rc == 0, raw2)
-                check("E2E_T24_CMDS", o2.get("PAINT_CMDS") == "7", raw2)
+                check("E2E_T24_CMDS", o2.get("PAINT_CMDS") == "10", raw2)
                 check(
                     "E2E_T24_SAME_DUMP",
                     pDump2.exists()
@@ -768,12 +841,18 @@ B5 html>body>p
                 )
                 check("E2E_T25_PAINT_OK", o3.get("PAINT") == "OK" and rc == 0, raw3)
                 check("E2E_T25_ERRORS", o3.get("PAINT_ERRORS") == "2", raw3)
-                check("E2E_T25_CMDS", o3.get("PAINT_CMDS") == "1", raw3)
+                check("E2E_T25_CMDS", o3.get("PAINT_CMDS") == "3", raw3)
                 check("E2E_T25_CANVAS", o3.get("PAINT_CANVAS") == "#ffffff", raw3)
                 if ppm3.exists():
                     d3 = ppm3.read_bytes()
-                    off = 15 + (5 * 800 + 5) * 3
+                    # stage 9: text gives .bad a 24px line box -> #ok is pushed
+                    # down to y=24 (was y=0); the teal fill moved with it
+                    off = 15 + (29 * 800 + 5) * 3
                     check("E2E_T25_TEAL_PIX", d3[off:off + 3] == b"\x00\x80\x80", raw3)
+                    # glyph 'y' rasterizes dark below the 10px box (baseline
+                    # 24+15=39, descender overflow) on the white canvas
+                    off2 = 15 + (39 * 800 + 5) * 3
+                    check("E2E_T25_TEXT_PIX", d3[off2:off2 + 3] == b"\x01\x01\x01", raw3)
 
                 # T25b: unwritable PPM path -> honest IO error, exit 5
                 rc, o4, raw4 = run_client(
@@ -905,11 +984,14 @@ B5 html>body>p
         # <style> with @media/@keyframes/@font-face, custom properties, flex,
         # grid) through --dom-file -> STYLE -> LAYOUT -> PAINT -> PNG. The
         # engine must digest it WITHOUT a crash and report honest counters.
-        # Today it paints nothing: text gives no height (no line boxes yet)
-        # and the page's colors are var(--custom-props) — both are honestly
-        # NOT_IMPLEMENTED, so the canvas is pure white. The frozen counters
-        # pin today's baseline: later stages move them deliberately, never
-        # silently. Fixture sha256 pins the input bytes.
+        # Stage 9 (v0.10.0) re-froze the baseline deliberately: text now lays
+        # 477 lines and paints 3264 glyph runs; the page's colors are still
+        # var(--custom-props) (honestly unresolved -> default backgrounds),
+        # so most text lands black-on-white. The page VIOLATES the
+        # HUMAN_FIRST health norms and the engine says so honestly: 61 lines
+        # with line-height < 1.5, 50 lines longer than 75 chars, 7 text pairs
+        # below the WCAG 2.2 / APCA Lc 75 floor. Counters move deliberately,
+        # never silently. Fixture sha256 pins the input bytes.
         fix = ROOT / "tests" / "fixtures" / "gologramma_v1.html"
         check(
             "E2E_T27_FIXTURE_SHA",
@@ -937,20 +1019,87 @@ B5 html>body>p
             check("E2E_T27_STYLED", o.get("STYLE_ELEMENTS_STYLED") == "662", raw)
             check("E2E_T27_INHERITED", o.get("STYLE_INHERITED") == "2159", raw)
             check("E2E_T27_LAYOUT_OK", o.get("LAYOUT") == "OK", raw)
-            check("E2E_T27_BOXES", o.get("LAYOUT_BOXES") == "506", raw)
+            check("E2E_T27_BOXES", o.get("LAYOUT_BOXES") == "675", raw)
             check("E2E_T27_HIDDEN", o.get("LAYOUT_HIDDEN") == "18", raw)
-            check("E2E_T27_LAYOUT_ERRORS", o.get("LAYOUT_ERRORS") == "126", raw)
+            check("E2E_T27_LAYOUT_ERRORS", o.get("LAYOUT_ERRORS") == "411", raw)
+            check("E2E_T27_LINES", o.get("LAYOUT_LINES") == "477", raw)
+            check("E2E_T27_TEXT_CHARS", o.get("LAYOUT_TEXT_CHARS") == "20922", raw)
+            check("E2E_T27_MISSING_GLYPHS", o.get("LAYOUT_MISSING_GLYPHS") == "3", raw)
+            check("E2E_T27_LINE_CHARS_MAX", o.get("LAYOUT_LINE_CHARS_MAX") == "80", raw)
             check("E2E_T27_PAINT_OK", o.get("PAINT") == "OK", raw)
             check("E2E_T27_CANVAS", o.get("PAINT_CANVAS") == "#ffffff", raw)
-            check("E2E_T27_NOTHING_PAINTED",
-                  o.get("PAINT_BOXES") == "0" and o.get("PAINT_CMDS") == "0", raw)
+            check("E2E_T27_TEXT_PAINTED",
+                  o.get("PAINT_BOXES") == "270" and o.get("PAINT_CMDS") == "3264"
+                  and o.get("PAINT_TEXT_RUNS") == "3264"
+                  and o.get("PAINT_TEXT_CHARS") == "18135", raw)
+            # HUMAN_FIRST health norms are MEASURED on the real page — the
+            # engine reports the page's violations honestly, not silently
+            check("E2E_T27_HEALTH_LH",
+                  o.get("HEALTH_LINE_HEIGHT_VIOLATIONS") == "61", raw)
+            check("E2E_T27_HEALTH_LL",
+                  o.get("HEALTH_LINE_LENGTH_VIOLATIONS") == "50", raw)
+            check("E2E_T27_HEALTH_WCAG",
+                  o.get("HEALTH_CONTRAST_VIOLATIONS") == "7", raw)
+            check("E2E_T27_HEALTH_APCA",
+                  o.get("HEALTH_APCA_VIOLATIONS") == "7", raw)
             png_ok = pngf.exists() and pngf.stat().st_size == 1_920_813
             check("E2E_T27_PNG_SIZE", png_ok, raw)
             if png_ok:
                 check(
                     "E2E_T27_PNG_SHA",
                     hashlib.sha256(pngf.read_bytes()).hexdigest()
-                    == "441a669d8477c68e3ba6df5fab2cba3b50f318f5359e2f6e5cd148facc4b370c",
+                    == "0ada362165f47cb7afd8674d55bd70b614c2222d7ab727fd3b5f1029ba9ed622",
+                    raw,
+                )
+
+        # ---- T28: text fixture — wrap, struts, unicode, missing glyph, ----
+        # ---- contrast norms measured honestly                        ----
+        # tests/fixtures/text_v1.html: word wrap in a 120px box (baselines
+        # 24px apart = the 1.5 default strut), line-height 8px (cramped ->
+        # HEALTH counts 5 violations), line-height 3 (48px), 32px font,
+        # Cyrillic white-on-black (WCAG 21:1, APCA 10788 - the WoB branch),
+        # dim #cccccc on white (WCAG 1.61:1, APCA 2729 - honestly below the
+        # Lc 75 floor), <br> strut, and one missing emoji (honestly counted,
+        # no tofu invented). Regression anchor: the APCA WoB bug (subtraction
+        # swapped) reported Lc 0 for every light-on-dark pair.
+        fix9 = ROOT / "tests" / "fixtures" / "text_v1.html"
+        check(
+            "E2E_T28_FIXTURE_SHA",
+            fix9.is_file()
+            and hashlib.sha256(fix9.read_bytes()).hexdigest()
+            == "8dbb9152f614b14206866af687bf5cad8e68039463c4755e9e776d5a39b8d6f5",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            png9 = Path(td) / "text.png"
+            rc, o, raw = run_client(
+                ["--dom-file", str(fix9), "--layout", "--paint",
+                 "--png-output", str(png9)]
+            )
+            check("E2E_T28_EXIT0", rc == 0, raw)
+            check("E2E_T28_LINES", o.get("LAYOUT_LINES") == "21", raw)
+            check("E2E_T28_BOXES", o.get("LAYOUT_BOXES") == "18", raw)
+            check("E2E_T28_TEXT_CHARS", o.get("LAYOUT_TEXT_CHARS") == "180", raw)
+            check("E2E_T28_BREAKS", o.get("LAYOUT_BREAKS") == "1", raw)
+            check("E2E_T28_MISSING_GLYPHS", o.get("LAYOUT_MISSING_GLYPHS") == "1", raw)
+            check("E2E_T28_HEALTH_LH",
+                  o.get("HEALTH_LINE_HEIGHT_VIOLATIONS") == "5", raw)
+            check("E2E_T28_TEXT_RUNS", o.get("PAINT_TEXT_RUNS") == "37", raw)
+            check("E2E_T28_TEXT_CMDS",
+                  o.get("PAINT_CMDS") == "38" and o.get("PAINT_BOXES") == "9", raw)
+            check("E2E_T28_WCAG_MIN", o.get("PAINT_WCAG_MIN_X100") == "161", raw)
+            check("E2E_T28_APCA_MIN",
+                  o.get("PAINT_APCA_MIN_LC_X100") == "2729", raw)
+            check("E2E_T28_HEALTH_CONTRAST",
+                  o.get("HEALTH_CONTRAST_VIOLATIONS") == "3", raw)
+            check("E2E_T28_HEALTH_APCA",
+                  o.get("HEALTH_APCA_VIOLATIONS") == "3", raw)
+            png9_ok = png9.exists() and png9.stat().st_size == 1_920_813
+            check("E2E_T28_PNG_SIZE", png9_ok, raw)
+            if png9_ok:
+                check(
+                    "E2E_T28_PNG_SHA",
+                    hashlib.sha256(png9.read_bytes()).hexdigest()
+                    == "7d229e14ca31f65ded179ba30fccdd3554266b3cb3ce71a1bd0381a888c3cefb",
                     raw,
                 )
 
