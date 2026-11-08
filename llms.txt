@@ -1,0 +1,37 @@
+# neutral-browser
+> neutral-browser: user-owned browser engine from scratch (Rust, zero deps) — HTML->DOM->CSS->STYLE->LAYOUT->PAINT->PNG; HUMAN_FIRST norms built in
+
+Автоген 2026-11-08 · источник: живой GitHub API (номера и файлы не руками) · владелец rtynbirf · ветка `main`
+
+## Мембрана
+- README.md — для человека (Neutral Browser — НЕЙТРАЛЬНЫЙ БРАУЗЕР ПОЛЬЗОВАТЕЛЯ)
+- AGENTS.md — есть
+- LICENSE — NOASSERTION
+- topics: browser-engine, from-scratch, minimalism, privacy, rendering, rust, system-layer, web-browser, zero-dependencies
+
+## Карта корня
+- .github/
+- .gitignore
+- AGENTS.md
+- CODEOWNERS
+- CODE_OF_CONDUCT.md
+- CONTRIBUTING.md
+- Cargo.lock
+- Cargo.toml
+- LICENSE
+- LICENSE-APACHE
+- LICENSE-MIT
+- MANIFEST.sha256
+- PULSE.md
+- README.md
+- SECURITY.md
+- … ещё 4
+
+## CI
+- workflow: ci
+- workflow: self-audit
+
+## Ссылки
+- [GitHub](https://github.com/rtynbirf/neutral-browser)
+- [README](https://github.com/rtynbirf/neutral-browser/blob/main/README.md)
+- [raw llms.txt](https://raw.githubusercontent.com/rtynbirf/neutral-browser/main/llms.txt)
