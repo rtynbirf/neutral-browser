@@ -1,6 +1,5 @@
 name: CI
 
-
 permissions:
   contents: read
 
@@ -15,5 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-      - run: cargo build --all-targets
-      - run: cargo test --all
+      - name: Сборка (locked — политика зависимостей)
+        run: cargo build --locked --all-targets
+      - name: Тесты
+        run: cargo test --all
+      - name: Self-test бинарника
+        run: ./target/debug/neutral-browser --self-test
+      - name: Гейт архитектуры (std-only python)
+        run: python3 tests/architecture.py
+      - name: Сканер молчания — негативный selftest + статика репо
+        run: |
+          python3 tools/silence_scan.py --selftest
+          python3 tools/silence_scan.py
+      - name: E2E «сертификат молчания» — живой прогон (локальный сервер, без внешней сети)
+        run: python3 tools/e2e.py
