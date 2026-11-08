@@ -29,3 +29,9 @@ jobs:
           python3 tools/silence_scan.py
       - name: E2E «сертификат молчания» — живой прогон (локальный сервер, без внешней сети)
         run: python3 tools/e2e.py
+      - name: Сертификат молчания ×6 — runtime-детектор внеполосных запросов (strace/LD_PRELOAD + строгий netns)
+        run: |
+          command -v strace >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq strace; }
+          python3 tools/silence_e2e.py --certificate ./target/debug/neutral-browser --require-netns
+      - name: Детектор молчания — негативный selftest
+        run: python3 tools/silence_e2e.py --selftest

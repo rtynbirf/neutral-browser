@@ -1,0 +1,73 @@
+name: "П43 supply-chain — cargo-deny + cargo-audit"
+
+# ВНЕШНИЕ CI-аудиторы supply-chain (волна ×6, ПРЕДЛОЖЕНИЕ-43 #2, issue #2).
+#
+# Границы честности:
+# - это НЕ зависимости движка: граф по-прежнему пуст (Cargo.lock = 1 пакет,
+#   [dependencies] пуст — гейт tests/architecture.py), политика
+#   docs/DEPENDENCY_POLICY.md не меняется;
+# - это НЕ часть оффлайн-петли машинной верификации (та остаётся std-only:
+#   эквивалент deny-чеков на пустом множестве — S5_CARGO_AUDIT в
+#   tools/silence_scan.py);
+# - тулы ставятся из официальных релизов GitHub с ПЛОМБОЙ sha256 тарболла
+#   (версия + хеш в шаге ниже) — детерминированный прогон, никаких
+#   плавающих latest.
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # еженедельный пересмотр advisories (новые RustSec-записи ловятся и на покое)
+    - cron: "23 3 * * 1"
+
+jobs:
+  cargo-deny:
+    name: cargo-deny check (licenses / advisories / bans / sources)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (пин по SHA — учитель OpenSSF Scorecard)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Rust toolchain (cargo metadata для cargo-deny)
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - name: cargo-deny 0.20.2 — установка с пломбой sha256
+        run: |
+          set -euo pipefail
+          V="0.20.2"
+          SHA="9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f"
+          curl -sSfL -o /tmp/cargo-deny.tgz \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${V}/cargo-deny-${V}-x86_64-unknown-linux-musl.tar.gz"
+          echo "${SHA}  /tmp/cargo-deny.tgz" | sha256sum -c -
+          tar -xzf /tmp/cargo-deny.tgz -C /usr/local/bin --strip-components=1 \
+            "cargo-deny-${V}-x86_64-unknown-linux-musl/cargo-deny"
+          chmod +x /usr/local/bin/cargo-deny
+          cargo-deny --version
+      - name: cargo-deny check --locked (deny.toml)
+        run: cargo-deny --locked check advisories bans licenses sources
+
+  cargo-audit:
+    name: cargo-audit (RustSec advisories по Cargo.lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (пин по SHA — учитель OpenSSF Scorecard)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: cargo-audit 0.22.2 — установка с пломбой sha256
+        run: |
+          set -euo pipefail
+          V="0.22.2"
+          SHA="7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428"
+          curl -sSfL -o /tmp/cargo-audit.tgz \
+            "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv${V}/cargo-audit-x86_64-unknown-linux-musl-v${V}.tgz"
+          echo "${SHA}  /tmp/cargo-audit.tgz" | sha256sum -c -
+          tar -xzf /tmp/cargo-audit.tgz -C /usr/local/bin --strip-components=1 \
+            "cargo-audit-x86_64-unknown-linux-musl-v${V}/cargo-audit"
+          chmod +x /usr/local/bin/cargo-audit
+          cargo-audit --version
+      - name: cargo-audit по lock (граф пуст — нечему быть уязвимым)
+        run: cargo-audit audit --file Cargo.lock

@@ -1,0 +1,59 @@
+# cargo-deny — внешний CI-аудитор supply-chain (волна ×6, ПРЕДЛОЖЕНИЕ-43 #2).
+#
+# Политика нулевых зависимостей (docs/DEPENDENCY_POLICY.md) НЕ меняется:
+# граф пуст — Cargo.lock содержит ровно один пакет (neutral-browser), у
+# Cargo.toml нет ни одной строки в [dependencies]. Поэтому каждый deny-чек
+# сходится на пустом множестве крейтов: нечему конфликтовать (bans),
+# нечему быть уязвимым (advisories), нет сторонних лицензий (licenses),
+# нет сторонних источников (sources). Offline-эквивалент этих чеков —
+# std-only S5_CARGO_AUDIT в tools/silence_scan.py; этот файл обслуживает
+# ВНЕШНИЙ прогон .github/workflows/cargo-deny.yml и не входит в
+# offline-петлю машинной верификации.
+#
+# Правило на будущее: первая настоящая зависимость обязана пройти здесь
+# licenses/bans/advisories И пересмотреть S5-чек (он требует пустоту).
+
+[graph]
+# Сборка может использовать только то, что зафиксировано в Cargo.lock.
+all-features = false
+
+[licenses]
+version = 2
+# Двойная лицензия проекта — MIT OR Apache-2.0; сторонних крейтов нет,
+# список — про запас для первой осознанной зависимости (если такое
+# когда-нибудь случится, каждый пункт обязан быть документирован).
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "ISC",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Дубликаты версий запрещены; для пустого графа — тривиально, для будущего
+# графа — жёсткий гейт против неявного раздувания дерева.
+multiple-versions = "deny"
+wildcards = "deny"
+deny = []
+skip = []
+skip-tree = []
+
+[advisories]
+version = 2
+# Известные уязвимости и отозванные (yanked) версии — красный.
+yanked = "deny"
+ignore = []
+
+[sources]
+# Крейты — только с официального индекса crates.io; git-источники запрещены.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
