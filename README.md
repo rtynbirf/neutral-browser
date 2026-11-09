@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="banner.png" alt="neutral-browser — Пользовательский браузерный движок с нуля (Rust)" width="100%">
+</div>
+
 # Neutral Browser — НЕЙТРАЛЬНЫЙ БРАУЗЕР ПОЛЬЗОВАТЕЛЯ
 
 <p align="center"><img src=".github/social-preview.png" alt="neutral-browser" width="100%"></p>
