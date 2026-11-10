@@ -1,0 +1,7 @@
+cff-version: 1.2.0
+message: "Если используете этот проект, процитируйте его так."
+title: "neutral-browser"
+abstract: "neutral-browser: user-owned browser engine from scratch (Rust, zero deps) — HTML->DOM->CSS->STYLE->LAYOUT->PAINT->PNG; HUMAN_FIRST norms built in"
+authors:
+  - name: "Полимат-Универсум (rtynbirf)"
+repository-code: "https://github.com/rtynbirf/neutral-browser"
