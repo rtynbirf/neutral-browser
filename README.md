@@ -2,6 +2,15 @@
   <img src="banner.png" alt="neutral-browser — Пользовательский браузерный движок с нуля (Rust)" width="100%">
 </div>
 
+<!--ФОРЖ:МУЗА:НАЧАЛО-->
+<div align="center">
+  <img src="repo-muse.svg" width="100%" alt="Муза neutral-browser: картина кузни ПОЛИМАТ, раунд 8" />
+  <br/>
+  <img src="forge-divider.svg" width="62%" alt="разделитель кузни ПОЛИМАТ" />
+</div>
+<!--ФОРЖ:МУЗА:КОНЕЦ-->
+
+
 # Neutral Browser — НЕЙТРАЛЬНЫЙ БРАУЗЕР ПОЛЬЗОВАТЕЛЯ
 
 <p align="center"><img src=".github/social-preview.png" alt="neutral-browser" width="100%"></p>
@@ -462,3 +471,10 @@ URL), `STYLE_RULES`, `STYLE_DECLS` (выжившие декларации),
 - Честные статусы: `VERIFIED / PARTIAL / NOT_IMPLEMENTED`.
 - Замкнутый контур качества: код → сборка → тесты → машинный вывод → README →
   архив → SHA-256 → worklog.
+
+<!--ФОРЖ:ПОДВАЛ-->
+---
+
+<div align="center">
+  <sub>◆ картина и штандарт — ручная ковка <a href="https://github.com/rtynbirf">КУЗНИ ПОЛИМАТ</a> · ЧЕЛОВЕК=АККАУНТ=PID1 ◆</sub>
+</div>
