@@ -1,3 +1,43 @@
+# = Канон .gitignore · rtynbirf/.github · протокол AGENTS.md v1.0 =
+# Системный мусор
+.DS_Store
+Thumbs.db
+desktop.ini
+# Кэши и сборка
 __pycache__/
-*.pyc
-target/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.next/
+# IDE
+.idea/
+.vscode/
+*.swp
+# Временное
+*.log
+*.tmp
+*.bak
+*~
+# Бинарники и медиа — НЕ в git (протокол Ф1/Ф2: Release или LFS)
+*.bundle
+*.zip
+*.cab
+*.wasm
+*.mp3
+*.mp4
+*.safetensors
+*.onnx
+*.gguf
+*.7z
+*.tar.gz
+*.part0000
+# Модели/данные >1MB — наружу
+*.pt
+*.ckpt
