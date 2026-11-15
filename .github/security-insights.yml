@@ -1,0 +1,46 @@
+header:
+  schema-version: 2.2.0
+  last-updated: '2026-11-15'
+  last-reviewed: '2026-11-15'
+  url: https://github.com/rtynbirf/neutral-browser/raw/main/.github/security-insights.yml
+  comment: |
+    Заполнено по живому аудиту флота rtynbirf 2026-11-15 (hardening W8).
+    Шаблон: ossf/security-insights example-minimum (прочитан живым GET).
+
+project:
+  name: rtynbirf · Полимат-Универсум
+  administrators:
+    - name: rtynbirf
+      affiliation: Полимат-Универсум
+      social: https://github.com/rtynbirf
+      primary: true
+  repositories:
+    - name: neutral-browser
+      url: https://github.com/rtynbirf/neutral-browser
+      comment: |
+        Активный репозиторий аккаунта rtynbirf (аудит 2026-11-15: не-форк, не-архив).
+  vulnerability-reporting:
+    reports-accepted: true
+    bug-bounty-available: false
+
+repository:
+  url: https://github.com/rtynbirf/neutral-browser
+  status: active
+  accepts-change-request: true
+  accepts-automated-change-request: true
+  core-team:
+    - name: rtynbirf
+      affiliation: Полимат-Универсум
+      social: https://github.com/rtynbirf
+      primary: true
+  license:
+    url: https://github.com/rtynbirf/neutral-browser/blob/main/LICENSE
+    expression: NOASSERTION
+  security:
+    assessments:
+      self:
+        comment: |
+          Самооценка 2026-11-15: PVR включён; secret scanning + push protection включены;
+          CodeQL default setup; OpenSSF Scorecard по расписанию; zizmor по расписанию;
+          GITHUB_TOKEN default read-only; защита ветки main от force-push/удаления;
+          релизы — immutable releases. Канал уязвимостей: Security → Report a vulnerability (PVR).
