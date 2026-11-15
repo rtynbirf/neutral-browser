@@ -30,6 +30,8 @@ on:
       - "Scorecard analysis"
       - "П43 supply-chain — cargo-deny + cargo-audit"
       - "ПУЛЬС v2 — еженедельный самоаудит"
+      - "РЕВО ОБХОД"
+      - "Workflow security lint (zizmor)"
     types: [completed]
 permissions:
   actions: write
