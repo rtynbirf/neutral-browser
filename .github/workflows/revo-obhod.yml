@@ -1,0 +1,15 @@
+name: РЕВО ОБХОД
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: write
+jobs:
+  obhod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: дежурная проверка оформления
+        run: python3 revo_obhod.py --issue || true
