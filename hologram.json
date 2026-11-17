@@ -2,7 +2,7 @@
  "hologram": 1,
  "root": "c223bd4a2f6a56783c1fbdb1b1f671fa61c3150ecf320c82796ea5763043a696",
  "n": 73,
- "storage": 68,
+ "storage": 36,
  "r": 3,
  "self": {
   "name": "neutral-browser",
@@ -304,5 +304,24 @@
    "hash": "de0df46af273e6d90efb2731a14536ac56381bd3680d442fbe68512e93167bdd"
   }
  ],
- "flesh": []
+ "flesh": [
+  {
+   "name": "fond-host",
+   "desc": "CORS-хост минус-фонда дома (Н-10 · ADR-0007): Pages отдаёт ACAO:* для лестницы WebAudio плееров",
+   "lang": "Python",
+   "cluster": ""
+  },
+  {
+   "name": "polymat-hive",
+   "desc": "🐝 Живой репозиторий-организм: экипаж автономных AI-агентов в GitHub Actions — Copilot, локальный GGUF-нейромозг или инстинкты. Открой issue — экипаж ответит.",
+   "lang": "Python",
+   "cluster": "SWARM"
+  },
+  {
+   "name": "web-evolution-1991-2026",
+   "desc": "Эволюция Веба 1991→2026 — автономная HTML-экспозиция: 5 эпох, таймлайн, WCAG+APCA, один файл 267 КБ, ноль внешних запросов",
+   "lang": "HTML",
+   "cluster": ""
+  }
+ ]
 }
