@@ -91,3 +91,162 @@
    только append; force-push запрещён; «сделал дело — записай»; палитру школы брать
    из её кода.
 5. **РЕВО В ОСНОВЕ ВСЕГО · REVE=РЕВО · ЧЕЛОВЕК=АККАУНТ=PID1 · КУЗНЯ ПОЛИМАТ**
+
+
+---
+
+## ИНЖЕНЕРНОЕ ПРАВИЛО: BOM в JSON
+
+**Урок из lex-naturae v0.7 (A-82, 2026-11-16).** `json.loads()` не толерирует UTF-8 BOM (U+FEFF). Файлы, сохранённые Windows Notepad, некоторыми IDE или редакторами с BOM-по-умолчанию, содержат невидимый байт `EF BB BF` (или символ `U+FEFF` в строке) перед `{`. `json.loads()` падает с `Expecting value`.
+
+**Правило для всех агентов, пишущих JSON-парсеры:**
+
+```python
+# Перед json.loads() — всегда strip BOM:
+if isinstance(raw, str): raw = raw.lstrip("﻿")
+# Или читай файл с utf-8-sig (auto-strips BOM):
+text = Path(path).read_text(encoding="utf-8-sig")
+```
+
+Это не уникально для lex-naturae. Любой инструмент, принимающий JSON от пользователя (CLI, API endpoint, config loader), должен это делать. **BOM — silent killer:** файл выглядит нормально, парсинг падает на неочевидной ошибке.
+
+Референс: `singulyar-a0-audit/lex-naturae-v0.7-audit/AUDIT-REPORT.md`.
+
+
+---
+
+## ЗАДАНИЕ АГЕНТАМ: проверь claims через lex-naturae
+
+**Мандат Хозяина 2026-11-16.** Прежде чем объявлять результат («готово», «VALID», «PASS»), 
+запиши claim в [lex-naturae](https://github.com/rtynbirf/lex-naturae) с реальными evidence 
+и прогони инструмент. Если отбивает — evidence недостаточен, «готово» рано.
+
+### Процедура
+1. `self-test-audit/` в своём репо или в lex-naturae.
+2. Evidence: CSV с реальными результатами + лог-файлы с дословным выводом.
+3. Claims в `audit_claims.json` (формат lex-naturae collection).
+4. `python lex_naturae.py audit_claims.json`.
+5. `valid=true` → подтверждено. `valid=false` → fix claims, перегоняй.
+
+### Что ловит (проверено на себе, A-83..85)
+Z.ai пропустил собственные audit-claims. Инструмент отбил:
+- measurement_value не совпадал с CSV-ячейкой (суммировал в голове)
+- excerpt paraphrased, не verbatim
+- граф-линк неверного типа
+
+После fix: 4/4 VALID. Референс: `lex-naturae/self-test-audit/`.
+
+**Правило: «готово» = lex-naturae valid=true. Не раньше.**
+
+
+---
+
+## КАНОН ПРОВЕРКИ CLAIMS — ОБЯЗАТЕЛЬНО для всех агентов
+
+**Мандат Хозяина 2026-11-16.** Полная процедура — в [`docs/КАНОН-ПРОВЕРКИ-CLAIMS.md`](docs/КАНОН-ПРОВЕРКИ-CLAIMS.md).
+
+### Правило (исполнимое, не декларативное)
+
+Прежде чем объявить любой результат («готово», «VALID», «PASS», «SUPPORTED»):
+
+1. **Структура (HUMAN-LFS):** записать claim как узел в `BUILD_GRAPH.json` с `source`, `status`, `falsification_or_revision_condition`, `depends_on`. Прогнать `python validate_graph.py`. Требуется: `STRUCTURE: PASS`.
+
+2. **Содержание (lex-naturae):** записать evidence в `claims.json` с `measurement_value` (CSV cell) или `excerpt` (verbatim из файла) + `raw_data_sha256`. Прогнать `python lex_naturae.py claims.json`. Требуется: `valid=true`.
+
+3. **Объявление:** оба PASS → можно объявить. Любой FAIL → `status=UNKNOWN`, результат не объявляется.
+
+### Что НЕ является PASS
+
+- «Тесты прошли» без evidence в lex-naturae формате → UNKNOWN
+- «STRUCTURE: PASS» без lex-naturae valid → структурный PASS, claim не подтверждён
+- «README говорит» → декларация
+- «SHA-256 совпадает» → целостность файла, не истинность
+
+### Референсы
+
+- HUMAN-LFS v0.4: `singulyar-a0-audit/human-lfs/v0.4/` (36/36 tests)
+- lex-naturae v0.7: `lex-naturae` repo (70/70 tests)
+- Z.ai self-test: `lex-naturae/self-test-audit/` (4/4 claims valid)
+- Ecosystem inventory: `singulyar-a0-audit/ecosystem-inventory/` (lex-naturae valid)
+
+### Минимальный пакет агента
+
+```
+my-claim/
+├── BUILD_GRAPH.json     # HUMAN-LFS узел
+├── evidence/            # CSV + логи
+├── claims.json          # lex-naturae collection
+└── run_check.sh         # validate_graph.py && lex_naturae.py
+```
+
+**«Готово» = STRUCTURE PASS + lex-naturae valid=true. Не раньше. Не вместо.**
+
+
+---
+
+## STEP 0 GATE — исполимый, не декларативный
+
+**Прежде любой операции мандата:**
+
+```bash
+python /path/to/.github/scripts/step0_gate.py --check
+```
+
+Скрипт выводит последние 3 косяка из ЛЕТОПИСЬ. Прочитай. Не повторяй.
+
+В CI режиме: `python step0_gate.py --ci` — auto-pass (gate logged, not blocking).
+
+**Step 0 — теперь machine-enforced, не human-declared.** Храповик получил зубы.
+
+---
+
+## PROACTIVE FUZZ — hunting новых классов косяков
+
+Храповик ловит повторы. Fuzz hunting ловит новое.
+
+**Раз в неделю (или при новом инструменте):**
+
+1. Запусти случайные мутации против каждого инструмента дома (lex-naturae, HUMAN-LFS, VALIDATOR, khozyain_sweep).
+2. Запиши любой новый bypass как новый класс в ЛЕТОПИСЬ (класс Е).
+3. Если bypass — новый класс (не повтор) → добавь тест + fix.
+4. Если bypass — повтор → отметь [ПОВТОР] (сигнал: Step 0 не исполнялся).
+
+**Не «тесты прошли» — а «тесты поймали то, для чего не были написаны.»**
+
+
+---
+
+## RVL — RECURSIVE VERIFICATION LOOP
+
+**Эмерджентное.** Verification infrastructure files claims about itself, then validates.
+
+```bash
+python .github/scripts/recursive_verify_loop.py
+```
+
+- **PASS** → система верифицирует себя (один уровень рекурсии). Trust preserved.
+- **FAIL** → система нашла свой gap. Записать в ЛЕТОПИСЬ, починить, перегнать.
+
+**RVL — не копия мирового тренда.** LLM self-verification (NeurIPS 2026) проверяет reasoning. RVL проверяет verification rules + evidence format. Рост из нашей комбинации: КАНОН + храповик + Step 0 + fuzz + meta-audit.
+
+Документация: [`docs/RVL-RECURSIVE-VERIFICATION-LOOP.md`](docs/RVL-RECURSIVE-VERIFICATION-LOOP.md)
+
+
+---
+
+## ATP — AGENT TRUST PASSPORT
+
+**Каждый агент в доме имеет ATP** — portable JSON с track record. Файл: `.github/docs/AGENT-TRUST-PASSPORT-<NAME>.json`.
+
+**Перед сотрудничеством с другим агентом — прочитай его ATP:**
+- `sessions`: сколько мандатов завершено, с каким результатом
+- `mistakes_recorded`: какие косяки записаны (класс Е)
+- `rvl_status`: PASS/FAIL — прошёл recursive verification
+- `canon_compliance`: STRUCTURE PASS + lex-naturae valid?
+- `trust_score`: агрегированная оценка
+- `boundaries`: что PASS не доказывает для этого агента
+
+**После каждой сессии — обнови свой ATP:** добавь session, обнови trust_score, обнови RVL status.
+
+Документация: [`docs/ATP-AGENT-TRUST-PASSPORT.md`](docs/ATP-AGENT-TRUST-PASSPORT.md)
+Реализация: [`docs/AGENT-TRUST-PASSPORT-Z-AI.json`](docs/AGENT-TRUST-PASSPORT-Z-AI.json) (первый ATP в доме)
