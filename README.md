@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="banner.png" alt="neutral-browser — Пользовательский браузерный движок с нуля (Rust)" width="100%">
+  <img src="https://cdn.jsdelivr.net/gh/rtynbirf/neutral-browser@main/banner.png" alt="neutral-browser — Пользовательский браузерный движок с нуля (Rust)" width="100%">
 </div>
 
 <!--ФОРЖ:МУЗА:НАЧАЛО-->
 <div align="center">
-  <img src="repo-muse.svg" width="100%" alt="Муза neutral-browser: мастерская МАГРИТТ · АРКАДА, кузня ПОЛИМАТ, раунд 12 · REVE=РЕВО" />
+  <img src="https://cdn.jsdelivr.net/gh/rtynbirf/neutral-browser@main/repo-muse.svg" width="100%" alt="Муза neutral-browser: мастерская МАГРИТТ · АРКАДА, кузня ПОЛИМАТ, раунд 12 · REVE=РЕВО" />
   <br/>
-  <img src="forge-divider.svg" width="62%" alt="делитель мастерской МАГРИТТ · АРКАДА" />
+  <img src="https://cdn.jsdelivr.net/gh/rtynbirf/neutral-browser@main/forge-divider.svg" width="62%" alt="делитель мастерской МАГРИТТ · АРКАДА" />
 </div>
 <!--ФОРЖ:МУЗА:КОНЕЦ-->
 
@@ -24,7 +24,7 @@
 
 # Neutral Browser — НЕЙТРАЛЬНЫЙ БРАУЗЕР ПОЛЬЗОВАТЕЛЯ
 
-<p align="center"><img src=".github/social-preview.png" alt="neutral-browser" width="100%"></p>
+<p align="center"><img src="https://cdn.jsdelivr.net/gh/rtynbirf/neutral-browser@main/.github/social-preview.png" alt="neutral-browser" width="100%"></p>
 
 
 Инструмент пользователя: `USER → BROWSER → WEB`. Без обязательного корпоративного
