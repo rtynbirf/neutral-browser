@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       GH_REPO: ${{ github.repository }}
-      REVOMAT_NUM: "19"
+      REVOMAT_NUM: "11"
     steps:
       - uses: actions/checkout@v4
         with:
